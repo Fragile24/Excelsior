@@ -1,19 +1,18 @@
 package tools
 
 import (
-	"cmp"
 	"context"
 	"encoding/json"
 	"log/slog"
 	"os"
 	"path/filepath"
-	"slices"
 )
 
 // Resource limits for tool execution.
 const (
-	MaxWriteSize     = 10 << 20 // 10 MB per write
-	MaxCommandLength = 8 << 10  // 8 KB command length cap for bash
+	MaxWriteSize        = 10 << 20 // 10 MB per write
+	MaxCommandLength    = 8 << 10  // 8 KB command length cap for bash
+	MaxObservationChars = 24_000
 )
 
 // Tool is the interface all agent tools implement.
@@ -22,33 +21,6 @@ type Tool interface {
 	Description() string
 	Parameters() any // JSON Schema
 	Execute(ctx context.Context, args json.RawMessage) (string, error)
-}
-
-// Registry holds available tools and exposes them as LLM tool definitions.
-type Registry struct {
-	tools map[string]Tool
-}
-
-// NewRegistry initializes a Registry with the provided tools.
-func NewRegistry(ts ...Tool) *Registry {
-	m := make(map[string]Tool, len(ts))
-	for _, t := range ts {
-		m[t.Name()] = t
-	}
-	return &Registry{tools: m}
-}
-
-// Get retrieves a tool by name.
-func (r *Registry) Get(name string) (Tool, bool) { t, ok := r.tools[name]; return t, ok }
-
-// All returns all registered tools as a slice, sorted by name for determinism.
-func (r *Registry) All() []Tool {
-	out := make([]Tool, 0, len(r.tools))
-	for _, t := range r.tools {
-		out = append(out, t)
-	}
-	slices.SortFunc(out, func(a, b Tool) int { return cmp.Compare(a.Name(), b.Name()) })
-	return out
 }
 
 // resolveRoot normalizes workspace to an absolute path, defaulting to cwd.
@@ -69,14 +41,21 @@ func resolveRoot(workspace string) string {
 	return workspace
 }
 
-// DefaultRegistry returns the core tools rooted at workspace.
-func DefaultRegistry(workspace string) *Registry {
+// WorkspaceTools returns the core tools rooted at workspace.
+func WorkspaceTools(workspace string) []Tool {
 	workspace = resolveRoot(workspace)
-	return NewRegistry(
-		&EditTool{Root: workspace},
+	state := NewFileState()
+	return []Tool{
+		&ReadFileTool{Root: workspace, State: state},
+		&WriteFileTool{Root: workspace, State: state},
+		&EditFileTool{Root: workspace, State: state},
+		&ListFilesTool{Root: workspace},
+		&GlobFilesTool{Root: workspace},
+		&GrepTextTool{Root: workspace},
+		&WebFetchTool{},
 		&BashTool{Root: workspace},
 		&AskTool{},
-	)
+	}
 }
 
 // jsonSchema helper constructs standard JSON Schema objects for tool parameter definitions.

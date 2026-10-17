@@ -12,4 +12,4 @@ Both standalone CLI and WebSocket commands enter internal/chat.Coordinator. See 
 
 CLI without a session uses ephemeral execution. Remote CLI authenticates, waits for a correlated start snapshot, and cancels that exact run. Desktop retains drafts until acknowledgement and restores workspace and subscriptions before enabling commands.
 
-Desktop authenticates an existing compatible engine or starts its packaged binary in a writable workspace. Closing desktop drains only its own child engine through the parent pipe.
+Desktop authenticates the configured engine or starts its packaged binary in a writable workspace. Closing desktop drains only its own child engine through the parent pipe.

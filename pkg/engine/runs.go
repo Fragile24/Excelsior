@@ -21,6 +21,7 @@ func deltaFromEvent(ev chat.Event) protocol.Delta {
 		ToolArgs:     ev.ToolArgs,
 		ToolResult:   ev.ToolResult,
 		FinishReason: ev.FinishReason,
+		Context:      ev.Context,
 	}
 	if ev.Usage != nil {
 		d.PromptTokens = ev.Usage.PromptTokens
@@ -58,8 +59,6 @@ func sessionDataFromSnapshot(snap chat.Snapshot) protocol.SessionDataResp {
 	}
 	if o := snap.Outcome; o != nil {
 		data.Outcome = &protocol.DoneResp{SessionID: o.SessionID, RunID: o.RunID, Status: o.Status, Persisted: o.Persisted, Error: o.Error, Code: o.Code}
-		data.Status = o.Status
-		data.Persisted = o.Persisted
 	}
 	for _, ev := range snap.Events {
 		data.Events = append(data.Events, deltaFromEvent(ev))

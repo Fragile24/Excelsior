@@ -1,75 +1,73 @@
 package agent
 
 import (
+	"cmp"
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
+	"unicode/utf8"
 
 	"excelsior/pkg/llm"
 	"excelsior/pkg/tools"
-	"excelsior/pkg/util"
 )
 
-// LLM is the provider interface the agent depends on for streaming chat completions.
-type LLM = llm.ToolLoopProvider
-
-// Runner defines the execution interface for an agentic turn.
-// It allows consumers (e.g. WebSocket engine, TUI) to execute turns against
-// either real Agent loops or mock runners.
+// Runner defines the execution interface used by the chat coordinator.
 type Runner interface {
 	RunWithHistory(ctx context.Context, opts RunOptions) (*RunResult, error)
 }
 
-// ToolRegistry is the port the agent depends on — small interface for testability.
-type ToolRegistry interface {
-	Get(name string) (tools.Tool, bool)
-	All() []tools.Tool
-}
-
-// Agent is the importable library. It owns the tool-call loop and streams
-// events to the caller so both CLI and TUI can render identically.
+// Agent runs a fixed ReAct loop and applies planning, action-space, context,
+// and safety policies around each provider call.
 type Agent struct {
-	LLM      LLM
-	Tools    ToolRegistry
-	System   string
-	MaxIters int // tool-call loop cap
-	Model    string
-	Logger   *slog.Logger
+	LLM     llm.ChatProvider
+	Tools   []tools.Tool
+	System  string
+	Model   string
+	Logger  *slog.Logger
+	Harness *HarnessConfig
 }
 
 var _ Runner = (*Agent)(nil)
 
-// StreamEvent is one fragment emitted during [Agent.Run].
-// Type is one of "text", "reasoning", "tool_start", "tool_result", "done", "error".
+// StreamEvent is one event emitted while a run is executing.
 type StreamEvent struct {
-	Type         string     // "text" | "reasoning" | "tool_start" | "tool_result" | "done" | "error"
-	Text         string     // delta text for Type=="text" or final text for "done"/"error"
-	Reasoning    string     // delta reasoning for Type=="reasoning" (deepseek-reasoner)
-	ToolName     string     // tool name for Type=="tool_start"/"tool_result"
-	ToolCallID   string     // provider tool_call_id
-	ToolArgs     string     // JSON arguments for Type=="tool_start"
-	ToolResult   string     // tool output for Type=="tool_result"
-	FinishReason string     // "stop" etc. for Type=="done"
-	Usage        *llm.Usage // token counts for Type=="done" (nil when provider omits them)
+	Type         string // text | reasoning | tool_start | tool_result | context | done | error
+	Text         string
+	Reasoning    string
+	ToolName     string
+	ToolCallID   string
+	ToolArgs     string
+	ToolResult   string
+	FinishReason string
+	Usage        *llm.Usage
+	Context      *ContextStatus
 }
 
-// RunOptions controls a single [Agent.Run] invocation.
+// RunOptions controls one agent run.
 type RunOptions struct {
-	// Messages is the conversation history excluding the system prompt.
-	// Must contain at least one user message.
-	Messages []llm.Message
-	// OnEvent is called for every streaming fragment. If nil, events are dropped.
-	// It must not block for long; it is invoked synchronously on the Run goroutine.
+	// Messages is the conversation history excluding the configured system prompt.
+	// It must contain at least one user message.
+	Messages        []llm.Message
+	ReasoningEffort llm.ReasoningEffort
+	// OnEvent receives streaming and tool lifecycle events synchronously.
 	OnEvent func(StreamEvent)
+	// Compact requests compaction before the first model step. Further requests
+	// are coalesced by the coordinator and consumed between complete tool turns.
+	Compact         bool
+	CompactRequests <-chan struct{}
 }
 
-const (
-	defaultMaxIters = 100
-	maxToolResult   = 20_000
-	maxContextChars = 600_000
-)
+// RunResult is the full, un-compacted transcript, including partial failed runs.
+// Context management only changes the private working copy sent to the model.
+type RunResult struct {
+	FinalMessage *llm.Message
+	Messages     []llm.Message
+	TotalUsage   *llm.Usage
+}
+
+const maxToolResultChars = tools.MaxObservationChars
 
 func (a *Agent) logger() *slog.Logger {
 	if a.Logger != nil {
@@ -78,33 +76,9 @@ func (a *Agent) logger() *slog.Logger {
 	return slog.Default()
 }
 
-func (a *Agent) maxIters() int {
-	if a.MaxIters > 0 {
-		return a.MaxIters
-	}
-	return defaultMaxIters
-}
-
-func (a *Agent) validate() error {
-	if a.LLM == nil {
-		return fmt.Errorf("agent validate: %w", ErrLLMNotConfigured)
-	}
-	if a.MaxIters < 0 {
-		return fmt.Errorf("agent validate: %w, got %d", ErrInvalidMaxIterations, a.MaxIters)
-	}
-	return nil
-}
-
-func (a *Agent) registry() ToolRegistry {
-	if a.Tools != nil {
-		return a.Tools
-	}
-	return tools.NewRegistry()
-}
-
 func (a *Agent) resolveModel() string {
-	if a.Model != "" {
-		return a.Model
+	if strings.TrimSpace(a.Model) != "" {
+		return strings.TrimSpace(a.Model)
 	}
 	if a.LLM != nil {
 		return a.LLM.ModelName()
@@ -112,172 +86,105 @@ func (a *Agent) resolveModel() string {
 	return ""
 }
 
-func totalChars(msgs []llm.Message) int {
-	n := 0
-	for _, m := range msgs {
-		n += len(m.Content) + len(m.ReasoningContent)
-		for _, call := range m.ToolCalls {
-			n += len(call.ID) + len(call.Function.Name) + len(call.Function.Arguments)
-		}
-	}
-	return n
-}
-
-// RunResult is the outcome of [Agent.RunWithHistory].
-type RunResult struct {
-	FinalMessage *llm.Message  // last assistant message (with any reasoning_content)
-	Messages     []llm.Message // full history including system prompt, tool outputs, and final message
-	TotalUsage   *llm.Usage    // accumulated token counts (nil when provider omits them)
-}
-
-// Run executes the agentic loop and returns the final assistant message.
-// It is a convenience wrapper around [Agent.RunWithHistory] when only the
-// final message is needed.
+// Run executes a conversation and returns its final assistant message.
 func (a *Agent) Run(ctx context.Context, opts RunOptions) (*llm.Message, error) {
-	res, err := a.RunWithHistory(ctx, opts)
+	result, err := a.RunWithHistory(ctx, opts)
 	if err != nil {
 		return nil, err
 	}
-	return res.FinalMessage, nil
+	return result.FinalMessage, nil
 }
 
-// RunWithHistory executes the agentic loop until the model stops calling tools
-// or MaxIters is reached. It streams deltas via opts.OnEvent, executes tools
-// via the ToolRegistry, and returns the complete history.
+// RunWithHistory executes a harness-controlled ReAct loop until the model
+// returns a final answer or the configured step budget is exhausted.
 func (a *Agent) RunWithHistory(ctx context.Context, opts RunOptions) (*RunResult, error) {
-	if err := a.validateRunOptions(opts); err != nil {
-		return nil, err
+	if a.LLM == nil {
+		return nil, fmt.Errorf("agent: %w", ErrLLMNotConfigured)
+	}
+	if len(opts.Messages) == 0 {
+		return nil, fmt.Errorf("agent: %w", ErrEmptyMessages)
+	}
+	if !hasUserMessage(opts.Messages) {
+		return nil, fmt.Errorf("agent: %w", ErrEmptyMessages)
 	}
 
+	cfg, err := normalizeHarnessConfig(a.Harness)
+	if err != nil {
+		return nil, err
+	}
 	messages := a.prepareMessages(opts.Messages)
-	reg := a.registry()
-	toolDefs := toLLMTools(reg.All())
 	emit := opts.OnEvent
 	if emit == nil {
 		emit = func(StreamEvent) {}
 	}
 	model := a.resolveModel()
-	a.logger().Info("agent run start", "model", model, "messages", len(messages), "maxIters", a.maxIters())
-	var acc usageAcc
-	return a.runNativeToolLoop(ctx, a.LLM, model, messages, toolDefs, reg, emit, &acc)
+	a.logger().Info("agent run start", "model", model, "messages", len(messages), "maxSteps", cfg.MaxSteps, "contextTier", cfg.ContextTier)
+
+	var usage usageAcc
+	result, err := a.runHarness(ctx, model, cfg, messages, emit, &usage, opts)
+	if err != nil {
+		emit(StreamEvent{Type: "error", Text: err.Error(), Usage: usage.Sum()})
+		return result, err
+	}
+	return result, nil
 }
 
-func (a *Agent) validateRunOptions(opts RunOptions) error {
-	if err := a.validate(); err != nil {
-		return err
+func hasUserMessage(messages []llm.Message) bool {
+	for _, message := range messages {
+		if message.Role == "user" {
+			return true
+		}
 	}
-	if len(opts.Messages) == 0 {
-		return fmt.Errorf("agent validate: %w", ErrEmptyMessages)
-	}
-	if n := totalChars(opts.Messages); n > maxContextChars {
-		return fmt.Errorf("agent validate: %w (%d chars > %d)", ErrContextTooLarge, n, maxContextChars)
-	}
-	return nil
+	return false
 }
 
 func (a *Agent) prepareMessages(incoming []llm.Message) []llm.Message {
 	messages := append([]llm.Message(nil), incoming...)
-	if a.System != "" && (len(messages) == 0 || messages[0].Role != "system") {
+	if strings.TrimSpace(a.System) != "" && (len(messages) == 0 || messages[0].Role != "system") {
 		messages = append([]llm.Message{{Role: "system", Content: a.System}}, messages...)
 	}
 	return sanitizeToolCalls(messages)
 }
 
-// sanitizeToolCalls ensures every assistant message with tool_calls is answered
-// by tool result messages, inserting placeholders for dangling calls (e.g. a
-// run cut off by the step budget). Providers reject unanswered tool calls.
-func sanitizeToolCalls(msgs []llm.Message) []llm.Message {
-	out := make([]llm.Message, 0, len(msgs))
+// sanitizeToolCalls closes dangling calls left by older or interrupted history
+// before a provider sees it.
+func sanitizeToolCalls(messages []llm.Message) []llm.Message {
+	out := make([]llm.Message, 0, len(messages))
 	pending := map[string]bool{}
 	flush := func() {
-		if len(pending) == 0 {
-			return
-		}
 		for id := range pending {
 			out = append(out, llm.Message{Role: "tool", ToolCallID: id, Content: "(tool call cancelled)"})
 		}
 		pending = map[string]bool{}
 	}
-	for _, m := range msgs {
-		if m.Role != "tool" {
+	for _, message := range messages {
+		if message.Role != "tool" {
 			flush()
 		}
-		if m.Role == "assistant" {
-			for _, tc := range m.ToolCalls {
-				if tc.ID != "" {
-					pending[tc.ID] = true
+		if message.Role == "assistant" {
+			for _, call := range message.ToolCalls {
+				if call.ID != "" {
+					pending[call.ID] = true
 				}
 			}
 		}
-		if m.Role == "tool" && m.ToolCallID != "" {
-			delete(pending, m.ToolCallID)
+		if message.Role == "tool" && message.ToolCallID != "" {
+			delete(pending, message.ToolCallID)
 		}
-		out = append(out, m)
+		out = append(out, message)
 	}
 	flush()
 	return out
 }
 
-func (a *Agent) runNativeToolLoop(ctx context.Context, native llm.ToolLoopProvider, model string, messages []llm.Message, toolDefs []llm.ToolDefinition, reg ToolRegistry, emit func(StreamEvent), acc *usageAcc) (*RunResult, error) {
-	final, generated, err := native.StreamChatWithTools(
-		ctx,
-		llm.ChatRequest{Model: model, Messages: messages, Tools: toolDefs},
-		a.maxIters(),
-		func(toolCtx context.Context, call llm.ToolCall) (string, error) {
-			tool, ok := reg.Get(call.Function.Name)
-			if !ok {
-				return "", fmt.Errorf("unknown tool %q", call.Function.Name)
-			}
-			return tool.Execute(toolCtx, json.RawMessage(call.Function.Arguments))
-		},
-		func(delta llm.Delta) error {
-			if delta.Usage != nil {
-				acc.Add(*delta.Usage)
-			}
-			if delta.ReasoningContent != "" {
-				emit(NewReasoningEvent(delta.ReasoningContent))
-			}
-			if delta.Content != "" {
-				emit(NewTextEvent(delta.Content))
-			}
-			return nil
-		},
-		func(call llm.ToolCall) {
-			emit(NewToolStartEvent(call.Function.Name, call.ID, call.Function.Arguments))
-		},
-		func(call llm.ToolCall, output string, err error) {
-			if err != nil {
-				output = fmt.Sprintf("error: %v", err)
-			}
-			emit(NewToolResultEvent(call.Function.Name, call.ID, truncateRunes(output, maxToolResult)))
-		},
-	)
-	if err != nil {
-		emit(NewErrorEvent(err.Error()))
-		return nil, fmt.Errorf("agent tool loop: %w", err)
-	}
-	if final == nil {
-		return nil, fmt.Errorf("agent tool loop: %w", ErrNilLLMMessage)
-	}
-
-	fullHistory := append([]llm.Message(nil), messages...)
-	fullHistory = append(fullHistory, generated...)
-	if len(generated) == 0 || generated[len(generated)-1].Role != "assistant" {
-		fullHistory = append(fullHistory, *final)
-	}
-	emit(NewDoneEvent(final.Content, "stop", acc.Sum()))
-	return &RunResult{FinalMessage: final, Messages: fullHistory, TotalUsage: acc.Sum()}, nil
-}
-
-// usageAcc sums per-step provider usage; Sum returns nil when nothing was reported.
 type usageAcc struct {
 	prompt, completion int
 	seen               bool
 }
 
-func (u *usageAcc) Add(x llm.Usage) {
-	u.prompt += x.PromptTokens
-	u.completion += x.CompletionTokens
+func (u *usageAcc) Add(usage llm.Usage) {
+	u.prompt += usage.PromptTokens
+	u.completion += usage.CompletionTokens
 	u.seen = true
 }
 
@@ -288,35 +195,43 @@ func (u *usageAcc) Sum() *llm.Usage {
 	return &llm.Usage{PromptTokens: u.prompt, CompletionTokens: u.completion, TotalTokens: u.prompt + u.completion}
 }
 
-func truncateRunes(s string, n int) string {
-	// ponytail: delegate rune counting to util.Truncate, keep "[truncated]" marker for test contract
-	t := util.Truncate(s, n)
-	if t == s {
-		return s
+func truncateRunes(value string, limit int) string {
+	if utf8.RuneCountInString(value) <= limit {
+		return value
 	}
-	return strings.TrimSuffix(t, "…") + "\n[truncated]"
+	const suffix = "\n[truncated]"
+	runes := []rune(value)
+	if limit <= len(suffix) {
+		return string(runes[:max(0, limit)])
+	}
+	return string(runes[:limit-len(suffix)]) + suffix
 }
 
-func toLLMTools(ts []tools.Tool) []llm.ToolDefinition {
-	out := make([]llm.ToolDefinition, 0, len(ts))
-	for _, t := range ts {
-		out = append(out, llm.ToolDefinition{
+func toLLMTools(registered map[string]tools.Tool) []llm.ToolDefinition {
+	definitions := make([]llm.ToolDefinition, 0, len(registered))
+	for _, tool := range registered {
+		definitions = append(definitions, llm.ToolDefinition{
 			Type: "function",
 			Function: llm.FuncDef{
-				Name:        t.Name(),
-				Description: t.Description(),
-				Parameters:  t.Parameters(),
+				Name:        tool.Name(),
+				Description: tool.Description(),
+				Parameters:  tool.Parameters(),
 			},
 		})
 	}
-	return out
+	slices.SortFunc(definitions, func(a, b llm.ToolDefinition) int { return cmp.Compare(a.Function.Name, b.Function.Name) })
+	return definitions
 }
 
-// DefaultSystemPrompt is intentionally small and DeepSeek-optimized.
-const DefaultSystemPrompt = `You are Excelsior, a senior coding agent. You work in the user's workspace.
+func jsonSchemaMap(properties map[string]any, required []string) map[string]any {
+	if required == nil {
+		required = []string{}
+	}
+	return map[string]any{"type": "object", "properties": properties, "required": required}
+}
 
-Rules:
-- Use tools to read, search, edit, and run. Don't guess file contents.
-- Prefer minimal, correct edits. Match project style.
-- After editing, verify with bash if relevant (go vet, go test, etc.).
-- Be concise. No superlatives.`
+// DefaultSystemPrompt is intentionally concise; harness-specific protocols are
+// injected only when their corresponding component is enabled.
+const DefaultSystemPrompt = `You are Excelsior, a senior coding agent working in the user's workspace.
+
+Use tools to inspect files before changing them. Make focused, correct changes that match the project style. Run relevant verification when useful, and report what changed and what you verified. Treat tool errors as useful feedback and change approach when an action fails.`

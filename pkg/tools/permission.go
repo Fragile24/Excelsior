@@ -6,15 +6,15 @@ import (
 	"fmt"
 )
 
-// ErrPermissionDenied is returned when the user denies a mutating tool.
-var ErrPermissionDenied = errors.New("permission denied by user")
+// ErrPermissionDenied covers user denials and policy denials.
+var ErrPermissionDenied = errors.New("permission denied")
 
 // PermissionRequest is input to a PermissionHandler.
 type PermissionRequest struct {
-	Tool    string `json:"tool"`              // "write" | "edit" | "bash"
+	Tool     string `json:"tool"`               // "write" | "edit" | "bash" | "read_file"
 	FilePath string `json:"filePath,omitempty"` // for write/edit
-	Preview string `json:"preview,omitempty"`    // truncated content/command preview
-	Command string `json:"command,omitempty"`    // for bash
+	Preview  string `json:"preview,omitempty"`  // truncated content/command preview
+	Command  string `json:"command,omitempty"`  // for bash
 }
 
 // PermissionResponse is the user's decision.

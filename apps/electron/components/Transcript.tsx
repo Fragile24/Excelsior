@@ -1,7 +1,7 @@
 "use client";
 
-import React, { forwardRef, useRef, useState } from "react";
-import { ArrowDown } from "lucide-react";
+import React, { useEffect, useRef, useState } from "react";
+import { ArrowDown, Minimize2 } from "./phosphor-icons";
 import MarkdownRenderer from "./MarkdownRenderer";
 import PermissionInline from "./PermissionInline";
 import type { PermissionReq } from "../lib/protocol";
@@ -12,27 +12,17 @@ type TranscriptProps = {
   streaming: boolean;
   permission?: PermissionReq | null;
   onPermissionDecision?: (approved: boolean) => void;
-  onAllowAll?: () => void;
+  onAllowAlways?: () => void;
 };
 
-const Transcript = forwardRef<HTMLDivElement, TranscriptProps>(function Transcript(
-  { blocks, streaming, permission, onPermissionDecision, onAllowAll },
-  ref
-) {
+function Transcript({ blocks, streaming, permission, onPermissionDecision, onAllowAlways }: TranscriptProps) {
   const innerRef = useRef<HTMLDivElement | null>(null);
   const [showJump, setShowJump] = useState(false);
 
-  const visible = blocks.filter((b) => b.role !== "system");
-
-  if (visible.length === 0) {
-    return <div className="flex-1" />;
-  }
-
-  const setRef = (el: HTMLDivElement | null) => {
-    innerRef.current = el;
-    if (typeof ref === "function") ref(el);
-    else if (ref) (ref as React.MutableRefObject<HTMLDivElement | null>).current = el;
-  };
+  useEffect(() => {
+    const el = innerRef.current;
+    if (el && !showJump) el.scrollTop = el.scrollHeight;
+  }, [blocks, streaming, showJump]);
 
   const handleScroll = () => {
     const el = innerRef.current;
@@ -47,20 +37,30 @@ const Transcript = forwardRef<HTMLDivElement, TranscriptProps>(function Transcri
 
   return (
     <div className="relative flex-1 min-h-0">
-      <div ref={setRef} onScroll={handleScroll} className="h-full overflow-y-auto px-4 md:px-8 py-4 space-y-3">
-        <div className="max-w-3xl mx-auto w-full">
-          {visible.map((block, index) => (
-            <MarkdownRenderer
+      <div ref={innerRef} onScroll={handleScroll} role="log" aria-label="Conversation" aria-live="polite" aria-busy={streaming} className="transcript-scroll h-full overflow-y-auto px-5 md:px-9 py-6 space-y-3">
+        <div className="transcript-content mx-auto w-full">
+          {blocks.map((block, index) => (
+            block.role === "context" ? <div key={`context-${index}`} className="context-transcript-note">
+              <Minimize2 size={13} aria-hidden="true" />
+              <div>
+                <span>{block.content}</span>
+                {block.context ? <p>{block.context.state === "compacted"
+                  ? `${block.context.beforeTokens.toLocaleString("en-US")} → ${block.context.inputTokens.toLocaleString("en-US")} input tokens · ${block.context.reason === "manual" ? "Requested" : "Automatic"}`
+                  : block.context.tier === 0 ? "The engine’s context policy disables compaction."
+                  : "No older turns were eligible. The original task and latest two turns were kept."}</p>
+                  : block.meta && <p>{block.meta}</p>}
+              </div>
+            </div> : <MarkdownRenderer
               key={`${block.role}-${index}`}
               role={block.role}
               content={block.content}
               meta={block.meta}
               args={block.args}
-              isStreaming={streaming && index === visible.length - 1}
+              isStreaming={streaming && index === blocks.length - 1}
             />
           ))}
           {permission && onPermissionDecision && (
-            <PermissionInline permission={permission} onDecision={onPermissionDecision} onAllowAll={onAllowAll} />
+            <PermissionInline permission={permission} onDecision={onPermissionDecision} onAllowAlways={onAllowAlways} />
           )}
         </div>
       </div>
@@ -76,6 +76,6 @@ const Transcript = forwardRef<HTMLDivElement, TranscriptProps>(function Transcri
       )}
     </div>
   );
-});
+}
 
 export default React.memo(Transcript);

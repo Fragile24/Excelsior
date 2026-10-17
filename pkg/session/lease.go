@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 )
 
@@ -35,7 +36,7 @@ func leaseKey(dir string) string {
 	}
 	dir = filepath.Clean(dir)
 	if runtime.GOOS == "windows" {
-		dir = lower(dir)
+		dir = strings.ToLower(dir)
 	}
 	return dir
 }
@@ -79,14 +80,4 @@ func releaseStoreLease(dir string) {
 		delete(leases, key)
 		l.f.Close()
 	}
-}
-
-func lower(s string) string {
-	b := []byte(s)
-	for i := range b {
-		if b[i] >= 'A' && b[i] <= 'Z' {
-			b[i] += 'a' - 'A'
-		}
-	}
-	return string(b)
 }

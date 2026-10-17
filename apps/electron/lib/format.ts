@@ -1,3 +1,9 @@
+import { DEFAULT_PROJECT } from "./constants";
+
+export function workspaceName(path?: string | null): string {
+  return path?.split(/[/\\]/).filter(Boolean).pop() ?? DEFAULT_PROJECT;
+}
+
 export function formatTimeAgo(updatedAt?: string, id?: string): string {
   const formatDiff = (ms: number): string => {
     const minutes = Math.floor(ms / 60000);

@@ -12,7 +12,6 @@ import (
 	"github.com/gorilla/websocket"
 
 	"excelsior/internal/chat"
-	"excelsior/internal/workspaces"
 
 	"excelsior/pkg/protocol"
 	"excelsior/pkg/session"
@@ -23,7 +22,7 @@ type Conn struct {
 	hub         *Hub
 	ws          *websocket.Conn
 	send        chan []byte
-	workspace   *workspaces.State
+	workspace   string
 	mu          sync.RWMutex
 	subs        map[string]*chat.Subscription
 	queuedBytes atomic.Int64
@@ -37,7 +36,7 @@ func newConn(hub *Hub, ws *websocket.Conn) *Conn {
 		ws:        ws,
 		send:      make(chan []byte, 128),
 		done:      make(chan struct{}),
-		workspace: workspaces.New(hub.Workspace),
+		workspace: hub.Workspace(),
 		subs:      make(map[string]*chat.Subscription),
 	}
 }
@@ -52,7 +51,9 @@ func (c *Conn) isClosed() bool {
 }
 
 func (c *Conn) currentWorkspace() string {
-	return c.workspace.Current()
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.workspace
 }
 
 func (c *Conn) sendEnvelope(env protocol.Envelope) {
@@ -180,6 +181,8 @@ func (c *Conn) dispatchEnvelope(ctx context.Context, env protocol.Envelope) {
 	switch env.Type {
 	case protocol.TypeChatCancel:
 		c.cancelTurn(env)
+	case protocol.TypeChatCompact:
+		c.compactTurn(env)
 	case protocol.TypeChatReq:
 		c.dispatchChat(ctx, env)
 	case protocol.TypeAskResp:
@@ -204,6 +207,10 @@ func (c *Conn) dispatchEnvelope(ctx context.Context, env protocol.Envelope) {
 		c.sendEnvelope(protocol.NewEnvelopeWithID(env.ID, "workspace.status", map[string]string{"branch": branchOf(ctx, c.currentWorkspace())}))
 	case protocol.TypeWorkspaceSet:
 		c.handleWorkspaceSet(ctx, env)
+	case protocol.TypeWorktreeList:
+		c.handleWorktreeList(ctx, env)
+	case protocol.TypeWorktreeCreate:
+		c.handleWorktreeCreate(ctx, env)
 	case protocol.TypeSettingsGet:
 		c.handleSettingsGet(ctx, env)
 	case protocol.TypeSettingsSet:
@@ -222,6 +229,10 @@ func (c *Conn) dispatchChat(_ context.Context, env protocol.Envelope) {
 	if !c.decodePayload(env, &req, "chat.req") {
 		return
 	}
+	if req.ReasoningEffort != "" && !req.ReasoningEffort.Valid() {
+		c.sendCommandError(env.ID, fmt.Errorf("invalid reasoning effort %q", req.ReasoningEffort))
+		return
+	}
 	if req.SessionID == "" {
 		req.SessionID = newID()
 	}
@@ -237,10 +248,12 @@ func (c *Conn) dispatchChat(_ context.Context, env protocol.Envelope) {
 	c.snapshot(env, req.SessionID)
 
 	go coord.ExecuteTurn(chat.StartCommand{
-		Workspace: workspace,
-		SessionID: req.SessionID,
-		Model:     req.Model,
-		Messages:  req.Messages,
+		Workspace:       workspace,
+		SessionID:       req.SessionID,
+		Model:           req.Model,
+		ReasoningEffort: req.ReasoningEffort,
+		Messages:        req.Messages,
+		Compact:         req.Compact,
 	}, handle)
 }
 
@@ -257,6 +270,21 @@ func (c *Conn) cancelTurn(env protocol.Envelope) {
 		return
 	}
 	c.sendEnvelope(protocol.NewEnvelopeWithID(env.ID, protocol.TypeChatCancel, map[string]any{"sessionId": req.SessionID, "runId": req.RunID, "accepted": true}))
+}
+
+func (c *Conn) compactTurn(env protocol.Envelope) {
+	var req struct {
+		SessionID string `json:"sessionId"`
+		RunID     string `json:"runId"`
+	}
+	if !c.decodePayload(env, &req, "chat.compact") {
+		return
+	}
+	if err := c.hub.Coordinator().Compact(c.currentWorkspace(), req.SessionID, req.RunID); err != nil {
+		c.sendCommandError(env.ID, err)
+		return
+	}
+	c.sendEnvelope(protocol.NewEnvelopeWithID(env.ID, protocol.TypeChatCompact, map[string]any{"sessionId": req.SessionID, "runId": req.RunID, "accepted": true}))
 }
 
 // snapshot sends a SessionData snapshot and registers the connection as a

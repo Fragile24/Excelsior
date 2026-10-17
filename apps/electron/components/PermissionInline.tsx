@@ -1,14 +1,14 @@
 import React from "react";
-import { Check, ShieldAlert, X } from "lucide-react";
+import { Check, ShieldAlert, X } from "./phosphor-icons";
 import type { PermissionReq } from "../lib/protocol";
 
 type PermissionInlineProps = {
   permission: PermissionReq;
   onDecision: (approved: boolean) => void;
-  onAllowAll?: () => void;
+  onAllowAlways?: () => void;
 };
 
-function PermissionInline({ permission, onDecision, onAllowAll }: PermissionInlineProps) {
+function PermissionInline({ permission, onDecision, onAllowAlways }: PermissionInlineProps) {
   return (
     <div className="bg-[var(--bg-card)] border-subtle rounded-xl p-3.5 my-2.5 animate-appear">
       <div className="flex items-center justify-between pb-2 border-subtle-b mb-2.5">
@@ -69,13 +69,13 @@ function PermissionInline({ permission, onDecision, onAllowAll }: PermissionInli
           <span>Allow</span>
         </button>
 
-        {onAllowAll && (
+        {onAllowAlways && (
           <button
             type="button"
-            onClick={onAllowAll}
+            onClick={onAllowAlways}
             className="flex items-center gap-1 px-2.5 py-1 rounded-md bg-[var(--bg-input)] hover:bg-amber-500/15 border-subtle text-amber-300 text-xs font-medium transition-colors cursor-pointer"
           >
-            <span>Allow All</span>
+            <span>Always Allow</span>
           </button>
         )}
       </div>

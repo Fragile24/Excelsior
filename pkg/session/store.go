@@ -1,10 +1,11 @@
 package session
 
 import (
-	"fmt"
+	"strings"
 	"time"
 
 	"excelsior/pkg/llm"
+	"excelsior/pkg/util"
 )
 
 // Record is the domain model representing a persisted conversation session.
@@ -25,17 +26,33 @@ type SessionMeta struct {
 	MsgCount  int       `json:"msgCount,omitempty"`
 }
 
-// Latest returns the most recently updated session via List+Load.
-// Stores with an efficient query (e.g. sqlite) implement their own.
-func Latest(s Store) (Record, error) {
-	metas, err := s.List()
-	if err != nil {
-		return Record{}, err
+// DisplayTitle uses a custom title or the first non-empty user message.
+func (r Record) DisplayTitle() string {
+	title := strings.TrimSpace(r.Title)
+	if title == "" {
+		for _, message := range r.Messages {
+			if message.Role == "user" && strings.TrimSpace(message.Content) != "" {
+				title = strings.TrimSpace(message.Content)
+				break
+			}
+		}
 	}
-	if len(metas) == 0 {
-		return Record{}, fmt.Errorf("session latest: %w", ErrSessionNotFound)
+	if title == "" {
+		title = "New Chat"
 	}
-	return s.Load(metas[0].ID)
+	return util.Truncate(title, 40)
+}
+
+// Metadata derives a display title while the record is already loaded.
+func (r Record) Metadata() SessionMeta {
+	updatedAt := r.UpdatedAt
+	if updatedAt.IsZero() {
+		updatedAt = r.CreatedAt
+	}
+	return SessionMeta{
+		ID: r.ID, Title: r.DisplayTitle(), CreatedAt: r.CreatedAt,
+		UpdatedAt: updatedAt, MsgCount: len(r.Messages),
+	}
 }
 
 // Store defines the storage port for persisting and retrieving chat sessions.
@@ -47,14 +64,11 @@ type Store interface {
 	// Load retrieves a session record by ID. Returns ErrSessionNotFound if missing.
 	Load(id string) (Record, error)
 
-	// List returns metadata summaries for all sessions, ordered by most recently updated.
+	// List returns metadata with display titles, ordered by most recently updated.
 	List() ([]SessionMeta, error)
 
 	// Delete removes a session record by ID. Delete is idempotent (missing ID is not an error).
 	Delete(id string) error
-
-	// Latest returns the most recently updated session record. Returns ErrSessionNotFound if empty.
-	Latest() (Record, error)
 }
 
 // CheckLease must succeed before any persistent read/modify/write operation.

@@ -2,14 +2,12 @@ package main
 
 import (
 	"context"
-
 	"fmt"
 	"io"
 	"log/slog"
 	"net/url"
 	"os"
 	"os/signal"
-
 	"strings"
 	"syscall"
 
@@ -32,12 +30,12 @@ var version = "v0.1.0"
 
 func main() {
 	setupLogger()
-	cfg := config.FromEnv()
-	var model, workspace, system, sessionID, engineURL, permission string
-	var yolo bool
-	var verbose bool
-
-	root := newRootCommand(cfg, &model, &workspace, &system, &sessionID, &engineURL, &permission, &yolo, &verbose)
+	cfg, err := config.FromEnv()
+	if err != nil {
+		slog.Error("invalid environment configuration", "err", err)
+		os.Exit(1)
+	}
+	root := newRootCommand(cfg)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -47,7 +45,9 @@ func main() {
 	}
 }
 
-func newRootCommand(cfg config.Config, model, workspace, system, sessionID, engineURL, permission *string, yolo *bool, verbose *bool) *cobra.Command {
+func newRootCommand(cfg config.Config) *cobra.Command {
+	var model, workspace, system, sessionID, engineURL, permission string
+	var verbose bool
 	// permissionOverride is a runtime-only CLI override (never persisted);
 	// persisted permission lives in Settings (workspace settings.json).
 	var permissionOverride config.PermissionMode
@@ -61,42 +61,33 @@ Examples:
   excelsior "add tests for pkg/tools"
   excelsior -m deepseek-v4-pro "explain this repo"
   echo "fix the bug in main.go" | excelsior
-  excelsior --yolo "run all commands without asking"  # same as --permission allow`,
+  excelsior --permission allow "run all commands without asking"`,
 		Args: cobra.ArbitraryArgs,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-			if *verbose {
+			if verbose {
 				slog.SetLogLoggerLevel(slog.LevelDebug)
 			}
-			// Runtime-only override: --yolo / --permission. Resolved with
+			// Runtime-only permission override. Resolved with
 			// LoadSettings (env-seeded) via permissions.Resolve at use sites.
-			if *yolo {
-				permissionOverride = config.PermissionAllow
-			} else if *permission != "" {
-				pm, err := config.ParsePermissionMode(*permission)
+			if permission != "" {
+				pm, err := config.ParsePermissionMode(permission)
 				if err != nil {
 					return err
 				}
 				permissionOverride = pm
 			}
-			// propagate resolved cfg for subcommands via context
-			cmd.SetContext(context.WithValue(cmd.Context(), configKey{}, cfg))
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// resolve cfg from context (may have permission override)
-			if v := cmd.Context().Value(configKey{}); v != nil {
-				if c, ok := v.(config.Config); ok {
-					cfg = c
-				}
-			}
 			prompt := resolvePrompt(args)
+			applyHarnessFlags(&cfg, cmd)
 			if prompt == "" {
 				return cmd.Help()
 			}
-			if *engineURL != "" {
+			if engineURL != "" {
 				token := os.Getenv("EXCELSIOR_ENGINE_TOKEN")
 				if token == "" {
-					remote, err := url.Parse(*engineURL)
+					remote, err := url.Parse(engineURL)
 					if err != nil {
 						return err
 					}
@@ -110,30 +101,56 @@ Examples:
 						return err
 					}
 				}
-				client := engine.WSClient{URL: *engineURL, Token: token, Workspace: *workspace}
-				return client.StreamRemote(cmd.Context(), protocol.ChatReq{SessionID: *sessionID, Model: normalizeModel(*model, cfg.Model), Messages: []llm.Message{{Role: "user", Content: prompt}}}, func(d protocol.Delta) error {
+				client := engine.WSClient{URL: engineURL, Token: token, Workspace: workspace}
+				return client.StreamRemote(cmd.Context(), protocol.ChatReq{SessionID: sessionID, Model: normalizeModel(model, cfg.Model), Messages: []llm.Message{{Role: "user", Content: prompt}}}, func(d protocol.Delta) error {
 					chatEventPrinter(chat.Event{Type: d.Type, Text: d.Text, Reasoning: d.Reasoning, ToolName: d.ToolName, ToolResult: d.ToolResult})
 					return nil
 				}, nil, nil)
 			}
-			return runAgent(cmd.Context(), cfg, permissionOverride, *model, *workspace, *system, *sessionID, prompt)
+			return runAgent(cmd.Context(), cfg, permissionOverride, model, workspace, system, sessionID, prompt)
 		},
 	}
-	root.PersistentFlags().StringVarP(model, "model", "m", "", "DeepSeek model (deepseek-v4-flash, deepseek-v4-pro)")
-	root.PersistentFlags().StringVarP(workspace, "workspace", "w", "", "Workspace root (default: cwd)")
-	root.PersistentFlags().StringVar(system, "system", "", "Override system prompt")
-	root.PersistentFlags().StringVar(sessionID, "session", "", "Session ID for persistence (.excelsior/sessions)")
-	root.PersistentFlags().StringVar(engineURL, "engine", "", "WebSocket engine URL (e.g. ws://localhost:17812/v1/ws)")
-	root.PersistentFlags().StringVar(permission, "permission", "", "Permission mode: ask|allow|deny (default ask, overrides EXCELSIOR_PERMISSION)")
-	root.PersistentFlags().BoolVar(yolo, "yolo", false, "Allow all commands without asking (same as --permission allow)")
-	root.PersistentFlags().BoolVar(yolo, "allow-all", false, "Allow all commands without asking (alias for --yolo)")
-	root.PersistentFlags().BoolVarP(verbose, "verbose", "v", false, "Verbose logging (debug)")
+	root.PersistentFlags().StringVarP(&model, "model", "m", "", "DeepSeek model (deepseek-v4-flash, deepseek-v4-pro)")
+	root.PersistentFlags().StringVarP(&workspace, "workspace", "w", "", "Workspace root (default: cwd)")
+	root.PersistentFlags().StringVar(&system, "system", "", "Override system prompt")
+	root.PersistentFlags().StringVar(&sessionID, "session", "", "Session ID for persistence (.excelsior/sessions)")
+	root.PersistentFlags().StringVar(&engineURL, "engine", "", "WebSocket engine URL (e.g. ws://localhost:17812/v1/ws)")
+	root.PersistentFlags().StringVar(&permission, "permission", "", "Permission mode: ask|allow|deny (default ask, overrides EXCELSIOR_PERMISSION)")
+	root.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "Verbose logging (debug)")
+	root.PersistentFlags().Int("context-tier", 0, "Context-management tier 0-4 (default: env EXCELSIOR_CONTEXT_TIER or 4)")
+	root.PersistentFlags().Int("context-window", 0, "Total input + output context tokens (default: env EXCELSIOR_CONTEXT_WINDOW or 128000)")
+	root.PersistentFlags().String("token-encoding", "", "Prompt/tokenizer profile: deepseek-v4 or deepseek-v4.1 (default: infer known model; env EXCELSIOR_TOKEN_ENCODING)")
+	root.PersistentFlags().Bool("planning", false, "Enable planning scaffold (default: env EXCELSIOR_PLANNING or true)")
+	root.PersistentFlags().String("action-space", "", "Action space: predefined or bash (default: env EXCELSIOR_ACTION_SPACE or predefined)")
 
-	root.AddCommand(&cobra.Command{Use: "run [prompt]", Short: "Run a single turn (alias for root)", Args: cobra.ArbitraryArgs, RunE: root.RunE})
-	root.AddCommand(newEngineCommand(cfg, workspace))
+	root.AddCommand(newEngineCommand(cfg, &workspace))
 	root.AddCommand(newModelsCommand())
 	root.AddCommand(newVersionCommand())
 	return root
+}
+
+func applyHarnessFlags(cfg *config.Config, cmd *cobra.Command) {
+	settings := config.HarnessSettings{ContextWindowTokens: 128000, ContextTier: 4, Planning: true, ActionSpace: "predefined"}
+	if cfg.Harness != nil {
+		settings = *cfg.Harness
+	}
+	flags := cmd.Root().PersistentFlags()
+	if flags.Changed("token-encoding") {
+		cfg.TokenEncoding, _ = flags.GetString("token-encoding")
+	}
+	if flags.Changed("context-tier") {
+		settings.ContextTier, _ = flags.GetInt("context-tier")
+	}
+	if flags.Changed("context-window") {
+		settings.ContextWindowTokens, _ = flags.GetInt("context-window")
+	}
+	if flags.Changed("planning") {
+		settings.Planning, _ = flags.GetBool("planning")
+	}
+	if flags.Changed("action-space") {
+		settings.ActionSpace, _ = flags.GetString("action-space")
+	}
+	cfg.Harness = &settings
 }
 
 func newModelsCommand() *cobra.Command {
@@ -185,8 +202,6 @@ func setupLogger() {
 	slog.SetDefault(slog.New(handler))
 }
 
-type configKey struct{}
-
 func runAgent(ctx context.Context, cfg config.Config, override config.PermissionMode, model, workspace, system, sessionID, prompt string) error {
 	if err := cfg.Validate(); err != nil {
 		return fmt.Errorf("config: %w", err)
@@ -209,7 +224,7 @@ func runAgent(ctx context.Context, cfg config.Config, override config.Permission
 	}
 
 	// Permission: flag override > workspace settings.json > user global > env > ask.
-	perm, _ := permissions.Resolve(override, config.LoadSettings(workspace))
+	perm := permissions.Resolve(override, config.LoadSettings(workspace))
 	// Permission handler for headless CLI: resolved mode, once per call, sequential.
 	var permHandler tools.PermissionHandler
 	switch perm {
@@ -223,12 +238,13 @@ func runAgent(ctx context.Context, cfg config.Config, override config.Permission
 		}
 	default: // ask but no TUI in headless mode: deny with hint
 		permHandler = func(ctx context.Context, req tools.PermissionRequest) (tools.PermissionResponse, error) {
+			if permissions.DefaultDecision(req) == config.PermissionAllow {
+				return tools.PermissionResponse{Approved: true}, nil
+			}
 			slog.Warn("permission denied (no TUI, use --permission allow)", "tool", req.Tool, "file", req.FilePath, "command", req.Command)
 			return tools.PermissionResponse{Approved: false}, nil
 		}
 	}
-	ctx = tools.WithPermissionHandler(ctx, permHandler)
-
 	ag := app.NewAgent(cfg, workspace, model, system, slog.Default())
 
 	messages := []llm.Message{{Role: "user", Content: prompt}}
@@ -254,10 +270,10 @@ func normalizeModel(flagModel, cfgModel string) string {
 	if m == "" {
 		m = strings.TrimSpace(cfgModel)
 	}
-	if resolved := llm.ResolveModel(m); resolved != "" {
-		return resolved
+	if m == "" {
+		m = config.DefaultModel
 	}
-	return config.DefaultModel
+	return m
 }
 
 func chatEventPrinter(ev chat.Event) {

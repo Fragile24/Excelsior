@@ -137,21 +137,43 @@ func (c *Conn) handleWorkspaceSet(ctx context.Context, env protocol.Envelope) {
 		c.mu.Lock()
 		subs := c.subs
 		c.subs = make(map[string]*chat.Subscription)
+		c.workspace = canonicalWorkspace(resolved)
 		c.mu.Unlock()
 		for _, sub := range subs {
 			sub.Close()
 		}
-		c.workspace.Set(canonicalWorkspace(resolved))
 		c.hub.logger().Info("switched workspace (per-conn)", "workspace", target)
 	}
 	c.sendEnvelope(protocol.NewEnvelopeWithID(env.ID, protocol.TypeWorkspaceSet, protocol.WorkspaceSetReq{Workspace: c.currentWorkspace()}))
 	c.handleSessionList(ctx, env)
 }
 
+func (c *Conn) handleWorktreeList(ctx context.Context, env protocol.Envelope) {
+	worktrees, err := listWorktrees(ctx, c.currentWorkspace())
+	if err != nil {
+		c.sendError(env.ID, fmt.Sprintf("list worktrees: %v", err))
+		return
+	}
+	c.sendEnvelope(protocol.NewEnvelopeWithID(env.ID, protocol.TypeWorktreeList, protocol.WorktreeListResp{Worktrees: worktrees}))
+}
+
+func (c *Conn) handleWorktreeCreate(ctx context.Context, env protocol.Envelope) {
+	var req protocol.WorktreeCreateReq
+	if !c.decodePayload(env, &req, "worktree.create") {
+		return
+	}
+	worktree, err := createWorktree(ctx, c.currentWorkspace(), req.Branch)
+	if err != nil {
+		c.sendError(env.ID, fmt.Sprintf("create worktree: %v", err))
+		return
+	}
+	c.sendEnvelope(protocol.NewEnvelopeWithID(env.ID, protocol.TypeWorktreeCreate, worktree))
+}
+
 func (c *Conn) handleSettingsGet(ctx context.Context, env protocol.Envelope) {
 	s := config.LoadSettings(c.currentWorkspace())
-	perm, allowAll := permissions.Resolve(c.hub.PermissionOverride, s)
-	c.sendEnvelope(protocol.NewEnvelopeWithID(env.ID, protocol.TypeSettingsGet, protocol.SettingsGetResp{Permission: string(perm), AllowAll: allowAll}))
+	perm := permissions.Resolve(c.hub.PermissionOverride, s)
+	c.sendEnvelope(protocol.NewEnvelopeWithID(env.ID, protocol.TypeSettingsGet, protocol.SettingsGetResp{Permission: string(perm)}))
 }
 
 func (c *Conn) handleSettingsSet(ctx context.Context, env protocol.Envelope) {
@@ -170,23 +192,14 @@ func (c *Conn) handleSettingsSet(ctx context.Context, env protocol.Envelope) {
 		s.Permission = pm
 		updated = true
 	}
-	if req.AllowAll != nil {
-		s.AllowAll = req.AllowAll
-		if *req.AllowAll {
-			s.Permission = config.PermissionAllow
-		} else if s.Permission == config.PermissionAllow {
-			s.Permission = config.PermissionAsk
-		}
-		updated = true
-	}
 	if updated {
 		if err := config.SaveSettings(c.currentWorkspace(), s); err != nil {
 			c.sendError(env.ID, fmt.Sprintf("save settings: %v", err))
 			return
 		}
 
-		c.hub.logger().Info("settings updated", "permission", s.Permission, "allowAll", s.AllowAll)
+		c.hub.logger().Info("settings updated", "permission", s.Permission)
 	}
-	perm, allowAll := permissions.Resolve(c.hub.PermissionOverride, s)
-	c.sendEnvelope(protocol.NewEnvelopeWithID(env.ID, protocol.TypeSettingsSet, protocol.SettingsSetResp{Permission: string(perm), AllowAll: allowAll}))
+	perm := permissions.Resolve(c.hub.PermissionOverride, s)
+	c.sendEnvelope(protocol.NewEnvelopeWithID(env.ID, protocol.TypeSettingsSet, protocol.SettingsSetResp{Permission: string(perm)}))
 }

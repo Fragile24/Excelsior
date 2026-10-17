@@ -65,7 +65,7 @@ function CodeBlock({ language = "text", code }: CodeBlockProps) {
   const displayLang = detectedLang || language || "text";
 
   return (
-    <div className="my-3 rounded-lg border-subtle bg-[var(--code-bg)] overflow-hidden font-mono text-[12.5px]">
+    <div className="code-block my-4 rounded-xl border-subtle bg-[var(--code-bg)] overflow-hidden font-mono text-[12.5px]">
       <div className="flex items-center justify-between px-3.5 py-1.5 bg-[var(--code-header)] text-[11.5px] text-[var(--text-dim)]">
         <span className="font-sans font-medium lowercase tracking-wide text-[var(--text-muted)]">{displayLang}</span>
         <button
@@ -84,7 +84,7 @@ function CodeBlock({ language = "text", code }: CodeBlockProps) {
           )}
         </button>
       </div>
-      <pre className="p-3.5 overflow-x-auto leading-relaxed selectable-text whitespace-pre-wrap text-[var(--text-main)]">
+      <pre className="p-4 overflow-x-auto leading-relaxed selectable-text whitespace-pre text-[var(--text-main)]">
         <code className="hljs" dangerouslySetInnerHTML={{ __html: highlighted }} />
       </pre>
     </div>

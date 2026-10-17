@@ -31,14 +31,13 @@ func sanitizeID(id string) (string, error) {
 	return id, nil
 }
 
-// DirStore implements [Store] persisting sessions as atomic JSONL files on disk.
+// DirStore implements [Store] persisting sessions as atomic JSON files on disk.
 type DirStore struct {
 	Dir string // Directory path e.g. .excelsior/sessions
-	mu  sync.RWMutex
+	mu  sync.Mutex
 	// lease state: writes require an owned store lease (see lease.go).
-	leaseErr error
-	holds    bool
-	closed   bool
+	holds  bool
+	closed bool
 }
 
 // Compile-time interface check.
@@ -64,10 +63,9 @@ func (s *DirStore) ensureLease() error {
 		return nil // path() reports ErrStoreDirEmpty on write
 	}
 	if err := acquireStoreLease(s.Dir); err != nil {
-		s.leaseErr = err
 		return err
 	}
-	s.leaseErr, s.holds = nil, true
+	s.holds = true
 	return nil
 }
 
@@ -98,7 +96,7 @@ func (s *DirStore) path(id string) (string, error) {
 	if strings.TrimSpace(s.Dir) == "" {
 		return "", fmt.Errorf("session path %q: %w", id, ErrStoreDirEmpty)
 	}
-	return filepath.Join(s.Dir, safe+".jsonl"), nil
+	return filepath.Join(s.Dir, safe+".json"), nil
 }
 
 // Save persists a session record atomically to disk.
@@ -133,20 +131,18 @@ func (s *DirStore) Save(rec Record) error {
 	return nil
 }
 
-// ponytail: one last-valid-line parser shared by Load + List (was duplicated loops)
-func lastRecord(b []byte) (Record, bool) {
-	lines := bytes.Split(b, []byte{'\n'})
-	for i := len(lines) - 1; i >= 0; i-- {
-		line := bytes.TrimSpace(lines[i])
-		if len(line) == 0 {
-			continue
-		}
-		var rec Record
-		if err := json.Unmarshal(line, &rec); err == nil {
-			return rec, true
-		}
+func decodeRecord(b []byte, id string) (Record, error) {
+	var rec Record
+	if err := json.Unmarshal(b, &rec); err != nil {
+		return Record{}, err
 	}
-	return Record{}, false
+	if rec.ID == "" {
+		rec.ID = id
+	}
+	if rec.UpdatedAt.IsZero() {
+		rec.UpdatedAt = rec.CreatedAt
+	}
+	return rec, nil
 }
 
 // Load retrieves a session record by ID from disk.
@@ -171,15 +167,9 @@ func (s *DirStore) Load(id string) (Record, error) {
 	if len(bytes.TrimSpace(b)) == 0 {
 		return Record{}, fmt.Errorf("session load %q: %w", id, ErrEmptySession)
 	}
-	rec, found := lastRecord(b)
-	if !found {
+	rec, err := decodeRecord(b, id)
+	if err != nil {
 		return Record{}, fmt.Errorf("session load %q: %w", id, ErrCorruptedSession)
-	}
-	if rec.ID == "" {
-		rec.ID = id
-	}
-	if rec.UpdatedAt.IsZero() {
-		rec.UpdatedAt = rec.CreatedAt
 	}
 	return rec, nil
 }
@@ -215,10 +205,10 @@ func (s *DirStore) List() ([]SessionMeta, error) {
 }
 
 func (s *DirStore) metaForEntry(e os.DirEntry) *SessionMeta {
-	if e.IsDir() || filepath.Ext(e.Name()) != ".jsonl" {
+	if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
 		return nil
 	}
-	id := strings.TrimSuffix(e.Name(), ".jsonl")
+	id := strings.TrimSuffix(e.Name(), ".json")
 	if _, err := sanitizeID(id); err != nil {
 		return nil
 	}
@@ -226,24 +216,12 @@ func (s *DirStore) metaForEntry(e os.DirEntry) *SessionMeta {
 	if err != nil || len(bytes.TrimSpace(b)) == 0 {
 		return nil
 	}
-	rec, found := lastRecord(b)
-	if !found {
+	rec, err := decodeRecord(b, id)
+	if err != nil {
 		return nil
 	}
-	if rec.ID == "" {
-		rec.ID = id
-	}
-	updatedAt := rec.UpdatedAt
-	if updatedAt.IsZero() {
-		updatedAt = rec.CreatedAt
-	}
-	return &SessionMeta{
-		ID:        rec.ID,
-		Title:     rec.Title,
-		CreatedAt: rec.CreatedAt,
-		UpdatedAt: updatedAt,
-		MsgCount:  len(rec.Messages),
-	}
+	meta := rec.Metadata()
+	return &meta
 }
 
 // Delete removes the session file for id. Missing files return nil (idempotent).
@@ -263,9 +241,4 @@ func (s *DirStore) Delete(id string) error {
 	}
 	slog.Info("session deleted", "id", id)
 	return nil
-}
-
-// Latest returns the most recently updated session record.
-func (s *DirStore) Latest() (Record, error) {
-	return Latest(s)
 }

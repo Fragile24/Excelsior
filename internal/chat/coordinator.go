@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"excelsior/internal/permissions"
-	"excelsior/internal/sessions"
 	"excelsior/pkg/agent"
 	"excelsior/pkg/config"
 	"excelsior/pkg/llm"
@@ -64,6 +63,8 @@ type activeRun struct {
 	response                        chan interactionResponse
 	projectionBytes                 int
 	projectionErr                   error
+	compactRequests                 chan struct{}
+	compactPending                  bool
 }
 type interactionResponse struct {
 	PermissionApproved  bool
@@ -72,7 +73,9 @@ type interactionResponse struct {
 }
 type StartCommand struct {
 	Workspace, SessionID, Model string
+	ReasoningEffort             llm.ReasoningEffort
 	Messages                    []llm.Message
+	Compact                     bool
 }
 type Config struct {
 	NewAgent               func(model, workspace string) (agent.Runner, error)
@@ -195,17 +198,18 @@ func (c *Coordinator) ReserveTurn(workspace, sessionID string, incoming ...llm.M
 		return nil, err
 	}
 	if errors.Is(err, session.ErrSessionNotFound) {
-		record = session.Record{ID: sessionID, Title: sessions.Title(incoming, ""), CreatedAt: time.Now().UTC()}
+		record = session.Record{ID: sessionID, CreatedAt: time.Now().UTC()}
+		record.Title = (session.Record{Messages: incoming}).DisplayTitle()
 		if err = st.Save(record); err != nil {
 			return nil, err
 		}
 	}
-	messages := cloneMessages(append(historyFrom(record), incoming...))
+	messages := cloneMessages(append(record.Messages, incoming...))
 	if messageBytes(messages) > MaxProjectionBytes {
 		return nil, ErrProjectionLimit
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	run := &activeRun{id: newID(), workspace: ws, sessionID: sessionID, ctx: ctx, cancel: cancel, done: make(chan struct{}), state: "preparing", record: record, messages: messages, projectionBytes: messageBytes(messages)}
+	run := &activeRun{id: newID(), workspace: ws, sessionID: sessionID, ctx: ctx, cancel: cancel, done: make(chan struct{}), state: "preparing", record: record, messages: messages, projectionBytes: messageBytes(messages), compactRequests: make(chan struct{}, 1)}
 	c.dropTerminalLocked(key)
 	c.runs[key] = run
 	// Existing subscribers must learn the new run before its first delta.
@@ -277,7 +281,10 @@ func (c *Coordinator) ExecuteTurn(cmd StartCommand, h *RunHandle) (*agent.RunRes
 		if c.permissionHandler != nil {
 			return c.permissionHandler(ctx, rq)
 		}
-		perm, _ := permissions.Resolve(c.effectivePermissionOverride(), config.LoadSettings(run.workspace))
+		perm := permissions.Resolve(c.effectivePermissionOverride(), config.LoadSettings(run.workspace))
+		if perm == config.PermissionAsk {
+			perm = permissions.DefaultDecision(rq)
+		}
 		if perm == config.PermissionAllow {
 			return tools.PermissionResponse{Approved: true}, nil
 		}
@@ -302,6 +309,7 @@ func (c *Coordinator) ExecuteTurn(cmd StartCommand, h *RunHandle) (*agent.RunRes
 	}
 	result, execErr := svc.RunPrepared(turnCtx, PreparedTurn{
 		SessionID: run.sessionID, RunID: run.id, Messages: cloneMessages(run.messages), Record: run.record,
+		ReasoningEffort: cmd.ReasoningEffort, Compact: cmd.Compact, CompactRequests: run.compactRequests,
 		OnEvent: func(ev Event) { ev.SessionID = run.sessionID; ev.RunID = run.id; c.appendAndBroadcastEvent(run, ev) },
 		OnPersist: func() error {
 			c.mu.Lock()
@@ -333,6 +341,14 @@ func (c *Coordinator) ExecuteTurn(cmd StartCommand, h *RunHandle) (*agent.RunRes
 	case execErr != nil:
 		outcome.Status = OutcomeFailed
 		outcome.Code = "execution_failed"
+		switch {
+		case errors.Is(execErr, agent.ErrContextBudget):
+			outcome.Code = "context_budget"
+		case errors.Is(execErr, agent.ErrStepBudget):
+			outcome.Code = "step_budget"
+		case errors.Is(execErr, agent.ErrStuck):
+			outcome.Code = "stuck"
+		}
 		outcome.Error = execErr.Error()
 	default:
 		outcome.Status = OutcomeSucceeded
@@ -364,6 +380,10 @@ func (c *Coordinator) waitInteraction(ctx context.Context, run *activeRun, pi Pe
 func (c *Coordinator) appendAndBroadcastEvent(run *activeRun, ev Event) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.appendEventLocked(run, ev)
+}
+
+func (c *Coordinator) appendEventLocked(run *activeRun, ev Event) {
 	if run.projectionErr != nil {
 		return
 	}
@@ -375,6 +395,9 @@ func (c *Coordinator) appendAndBroadcastEvent(run *activeRun, ev Event) {
 		return
 	}
 	run.projectionBytes += size
+	if ev.Context != nil && ev.Context.Reason == "manual" && ev.Context.State != "compacting" {
+		run.compactPending = false
+	}
 	n := len(run.events)
 	if n > 0 && (ev.Type == "text" || ev.Type == "reasoning") && run.events[n-1].Type == ev.Type {
 		run.events[n-1].Text += ev.Text
@@ -408,7 +431,17 @@ func (c *Coordinator) finish(run *activeRun, outcome Outcome, result *agent.RunR
 	snap.UnsavedAvailable = outcome.Status != OutcomeSucceeded
 	if result != nil && (outcome.Status == OutcomeSucceeded || outcome.Status == OutcomePersistenceFailed) {
 		snap.Messages = cloneMessages(withoutSystemMessages(result.Messages))
+		// The transcript already contains generated text and tools. Keep context
+		// telemetry so reconnects retain the last measured input and compactions.
 		snap.Events = nil
+		for _, event := range run.events {
+			if event.Type == "context" || event.Type == "compact_queued" || event.Type == "generation" {
+				if event.Type == "generation" {
+					event.Text = "" // usage is retained; text is already in Messages
+				}
+				snap.Events = append(snap.Events, cloneEvent(event))
+			}
+		}
 	}
 	c.retainLocked(key, snap)
 	c.publishLocked(key, Update{Outcome: &outcome})
@@ -427,6 +460,37 @@ func (c *Coordinator) Cancel(workspace, sessionID, runID string) error {
 	if run.state != "persisting" {
 		run.cancel()
 	}
+	return nil
+}
+
+// Compact queues one request at a complete model/tool boundary. It never
+// interrupts a provider call or mutates the persisted conversation transcript.
+func (c *Coordinator) Compact(workspace, sessionID, runID string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	run := c.runs[sessionKey(workspace, sessionID)]
+	if run == nil || runID == "" || run.id != runID || run.ctx.Err() != nil || run.state == "persisting" {
+		return ErrRunNotFound
+	}
+	if run.compactPending {
+		return nil
+	}
+	var current *agent.ContextStatus
+	for i := len(run.events) - 1; i >= 0; i-- {
+		if run.events[i].Context != nil {
+			current = run.events[i].Context
+			break
+		}
+	}
+	if current == nil || !current.CanCompact {
+		return errors.New("no older context is available to compact yet")
+	}
+	if current.State == "compacting" {
+		return errors.New("context compaction is already in progress")
+	}
+	run.compactPending = true
+	run.compactRequests <- struct{}{}
+	c.appendEventLocked(run, Event{SessionID: sessionID, RunID: runID, Type: "compact_queued"})
 	return nil
 }
 
@@ -593,9 +657,9 @@ func (c *Coordinator) ListSessions(ws string) ([]session.SessionMeta, error) {
 	if err := session.CheckLease(st); err != nil {
 		return nil, err
 	}
-	return (sessions.Service{Store: st}).List()
+	return st.List()
 }
-func (c *Coordinator) mutate(ws, id string, discardProjection bool, fn func(sessions.Service) error) error {
+func (c *Coordinator) mutate(ws, id string, discardProjection bool, fn func(session.Store) error) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.stopped {
@@ -609,7 +673,7 @@ func (c *Coordinator) mutate(ws, id string, discardProjection bool, fn func(sess
 	if err := session.CheckLease(st); err != nil {
 		return err
 	}
-	if err := fn(sessions.Service{Store: st}); err != nil {
+	if err := fn(st); err != nil {
 		return err
 	}
 	if discardProjection {
@@ -618,13 +682,22 @@ func (c *Coordinator) mutate(ws, id string, discardProjection bool, fn func(sess
 	return nil
 }
 func (c *Coordinator) CreateSession(ws, id, title string) error {
-	return c.mutate(ws, id, true, func(s sessions.Service) error { return s.Create(id, title) })
+	return c.mutate(ws, id, true, func(s session.Store) error {
+		return s.Save(session.Record{ID: id, Title: title})
+	})
 }
 func (c *Coordinator) DeleteSession(ws, id string) error {
-	return c.mutate(ws, id, true, func(s sessions.Service) error { return s.Delete(id) })
+	return c.mutate(ws, id, true, func(s session.Store) error { return s.Delete(id) })
 }
 func (c *Coordinator) RenameSession(ws, id, title string) error {
-	return c.mutate(ws, id, false, func(s sessions.Service) error { return s.Rename(id, title) })
+	return c.mutate(ws, id, false, func(s session.Store) error {
+		record, err := s.Load(id)
+		if err != nil {
+			return err
+		}
+		record.Title = title
+		return s.Save(record)
+	})
 }
 
 // Shutdown retains ownership on timeout; the owning executable must then exit.

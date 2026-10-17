@@ -1,12 +1,22 @@
 package llm
 
-import (
-	"excelsior/pkg/config"
+// ReasoningEffort selects the provider's reasoning budget for one generation.
+type ReasoningEffort string
+
+const (
+	ReasoningEffortNone ReasoningEffort = "none"
+	ReasoningEffortLow  ReasoningEffort = "low"
+	ReasoningEffortHigh ReasoningEffort = "high"
+	ReasoningEffortMax  ReasoningEffort = "max"
 )
 
-// ResolveModel trims whitespace and returns the model ID (no alias mapping).
-func ResolveModel(m string) string {
-	return config.ResolveModel(m)
+func (e ReasoningEffort) Valid() bool {
+	switch e {
+	case ReasoningEffortNone, ReasoningEffortLow, ReasoningEffortHigh, ReasoningEffortMax:
+		return true
+	default:
+		return false
+	}
 }
 
 // Message is a chat message. ReasoningContent is DeepSeek-specific (R1/reasoner).
@@ -45,37 +55,25 @@ type FuncDef struct {
 	Parameters  any    `json:"parameters"` // JSON Schema
 }
 
-// ChatRequest is the wire format for /v1/chat/completions.
+// ChatRequest contains one generation's input and sampling settings.
 type ChatRequest struct {
-	Model       string           `json:"model"`
-	Messages    []Message        `json:"messages"`
-	Tools       []ToolDefinition `json:"tools,omitempty"`
-	ToolChoice  any              `json:"tool_choice,omitempty"` // "auto" | "required" | object
-	Stream      bool             `json:"stream"`
-	Temperature *float64         `json:"temperature,omitempty"`
-	MaxTokens   *int             `json:"max_tokens,omitempty"`
-	TopP        *float64         `json:"top_p,omitempty"`
+	// ContextWindowTokens is the total input + output budget; zero disables the
+	// client-side token guard for standalone callers. It is never sent on the wire.
+	ContextWindowTokens int              `json:"-"`
+	Model               string           `json:"model"`
+	ReasoningEffort     ReasoningEffort  `json:"-"`
+	Messages            []Message        `json:"messages"`
+	Tools               []ToolDefinition `json:"tools,omitempty"`
+	Temperature         *float64         `json:"temperature,omitempty"`
+	MaxTokens           *int             `json:"max_tokens,omitempty"`
+	TopP                *float64         `json:"top_p,omitempty"`
 }
 
 // Delta is a streaming fragment.
 type Delta struct {
 	Content          string
 	ReasoningContent string
-	ToolCalls        []ToolCallDelta
-	FinishReason     string
-	Done             bool
 	Usage            *Usage
-}
-
-// ToolCallDelta is an incremental tool-call fragment within a [Delta].
-type ToolCallDelta struct {
-	Index    int
-	ID       string
-	Type     string
-	Function struct {
-		Name      string
-		Arguments string
-	}
 }
 
 // Usage reports token counts when provided by the API.

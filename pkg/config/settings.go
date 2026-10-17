@@ -12,9 +12,6 @@ import (
 // Stored at <workspace>/.excelsior/settings.json and fallback to user config dir.
 type Settings struct {
 	Permission PermissionMode `json:"permission,omitempty"` // ask|allow|deny
-	// AllowAll is a convenience alias: when true, Permission is treated as allow.
-	// Kept for explicit UI toggle "Allow all commands without asking".
-	AllowAll *bool `json:"allowAll,omitempty"`
 }
 
 // SettingsPath returns the primary path for workspace settings.
@@ -58,9 +55,6 @@ func LoadSettings(workspace string) Settings {
 			if s.Permission != "" {
 				merged.Permission = s.Permission
 			}
-			if s.AllowAll != nil {
-				merged.AllowAll = s.AllowAll
-			}
 		}
 	}
 	return merged
@@ -95,14 +89,6 @@ func SaveSettings(workspace string, s Settings) error {
 			path = p
 		}
 	}
-	// normalize
-	if s.AllowAll != nil {
-		if *s.AllowAll {
-			s.Permission = PermissionAllow
-		} else if s.Permission == PermissionAllow {
-			// keep as is, but allowAll false doesn't force ask if explicit permission was allow
-		}
-	}
 	b, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
 		return err
@@ -111,14 +97,8 @@ func SaveSettings(workspace string, s Settings) error {
 	return util.WriteAtomic(path, b, 0o600)
 }
 
-// EffectivePermission resolves final PermissionMode from settings and explicit allowAll.
+// EffectivePermission resolves the stored permission mode or its fallback.
 func (s Settings) EffectivePermission(fallback PermissionMode) PermissionMode {
-	if s.AllowAll != nil {
-		if *s.AllowAll {
-			return PermissionAllow
-		}
-		// allowAll=false does not override explicit permission=allow; fall through to s.Permission
-	}
 	if s.Permission != "" {
 		return s.Permission
 	}

@@ -2,19 +2,15 @@ package llm
 
 import "context"
 
-// ToolLoopProvider is the application-facing LLM port. Providers own the
-// complete multi-step tool loop; the GoAI-backed Client is the standard implementation.
-type ToolLoopProvider interface {
+// ChatProvider performs exactly one generation step. The agent owns tool
+// execution and history management so the harness policy remains provider-
+// independent and consistent across models.
+type ChatProvider interface {
 	ModelName() string
-	StreamChatWithTools(
-		ctx context.Context,
-		req ChatRequest,
-		maxSteps int,
-		execute func(context.Context, ToolCall) (string, error),
-		onDelta func(Delta) error,
-		onToolStart func(ToolCall),
-		onToolResult func(ToolCall, string, error),
-	) (*Message, []Message, error)
+	// CountTokens returns the exact size of this provider's complete input prompt.
+	// Unsupported models or prompt formats must return an error, not an estimate.
+	CountTokens(ctx context.Context, req ChatRequest) (int, error)
+	StreamChat(ctx context.Context, req ChatRequest, onDelta func(Delta) error) (*Message, *Usage, error)
 }
 
-var _ ToolLoopProvider = (*Client)(nil)
+var _ ChatProvider = (*Client)(nil)

@@ -2,9 +2,11 @@ import {
   decodeMessage,
   RUN_CAPABILITY,
   type Commands,
+  type ReasoningEffort,
   type ReplyType,
   type Responses,
   type WireMessage,
+  type WorktreeInfo,
 } from "./protocol";
 
 export type ConnectionStatus =
@@ -31,6 +33,7 @@ type Pending = {
 };
 export type EngineClientHandlers = {
   onMessage: (msg: WireMessage) => void;
+  onSelection?: (id: string | null) => void;
   onStatus: (status: ConnectionStatus) => void;
   onError: (message: string) => void;
   getToken: (url: string) => Promise<string>;
@@ -92,9 +95,10 @@ export class EngineClient {
     type: K,
     payload: Commands[K],
     bootstrap = false,
+    timeoutMs = 10000,
   ): Promise<Responses[ReplyType<K>]> {
     const ws = this.ws;
-    if ((!this.ready && !bootstrap) || !this.authed || ws?.readyState !== 1){
+    if ((!this.ready && !bootstrap) || !this.authed || ws?.readyState !== 1) {
       throw new CommandError(
         "Engine is not ready; your command was not sent.",
         "unsent",
@@ -115,7 +119,7 @@ export class EngineClient {
           ),
         );
         ws.close();
-      }, 10000);
+      }, timeoutMs);
       this.pending.set(id, {
         resolve: (msg) => resolve(msg.payload as Responses[ReplyType<K>]),
         reject,
@@ -230,6 +234,11 @@ export class EngineClient {
         if (pending && msg.type !== "error" && msg.type !== pending.expected)
           throw new Error("Unexpected command response");
         if (msg.type !== "error") this.handlers.onMessage(msg);
+        if (msg.type === "done" && msg.workspace === this.confirmedWorkspace) {
+          void this.request("session.list", {}, true).catch((error) => {
+            if (current() && msg.workspace === this.confirmedWorkspace) this.handlers.onError(String(error));
+          });
+        }
         if (pending) {
           clearTimeout(pending.timer);
           this.pending.delete(msg.id!);
@@ -291,6 +300,7 @@ export class EngineClient {
       check();
     }
     if (generation !== this.generation || this.dead) return;
+    this.handlers.onSelection?.(active ?? null);
     this.attempts = 0;
     this.ready = true;
     this.synchronizing = false;
@@ -312,12 +322,19 @@ export class EngineClient {
       throw e;
     }
   }
+  async listWorktrees(): Promise<WorktreeInfo[]> {
+    return (await this.request("worktree.list", {})).worktrees;
+  }
+  createWorktree(branch: string): Promise<WorktreeInfo> {
+    return this.request("worktree.create", { branch }, false, 150000);
+  }
   async selectSession(id: string) {
     const check = this.scopeGuard();
     this.desired().add(id);
     const snap = await this.request("session.data", { id });
     check();
     this.activeSessions.set(this.confirmedWorkspace, id);
+    this.handlers.onSelection?.(id);
     return snap;
   }
   async createSession(title = "New session") {
@@ -332,7 +349,7 @@ export class EngineClient {
     check();
     return created.id;
   }
-  async startChat(text: string, model: string, sessionId: string | null) {
+  async startChat(text: string, model: string, sessionId: string | null, compact = false, reasoningEffort?: ReasoningEffort) {
     // Acknowledge creation before sending the prompt. Never infer its target
     // from a later UI selection or retry a potentially accepted prompt.
     const check = this.scopeGuard();
@@ -342,12 +359,17 @@ export class EngineClient {
     const snap = await this.request("chat.req", {
       sessionId: id,
       model,
+      ...(reasoningEffort ? { reasoningEffort } : {}),
       messages: [{ role: "user", content: text }],
+      ...(compact ? { compact: true } : {}),
     });
     return snap;
   }
   cancelRun(sessionId: string, runId: string) {
     return this.request("chat.cancel", { sessionId, runId });
+  }
+  compactRun(sessionId: string, runId: string) {
+    return this.request("chat.compact", { sessionId, runId });
   }
   replyAsk(payload: Commands["ask.resp"]) {
     return this.request("ask.resp", payload);
@@ -360,8 +382,10 @@ export class EngineClient {
     await this.request("session.delete", { id });
     check();
     this.desired().delete(id);
-    if (this.activeSessions.get(this.confirmedWorkspace) === id)
+    if (this.activeSessions.get(this.confirmedWorkspace) === id) {
       this.activeSessions.delete(this.confirmedWorkspace);
+      this.handlers.onSelection?.(null);
+    }
     await this.request("session.unsubscribe", { id });
     check();
     await this.request("session.list", {});
@@ -374,8 +398,5 @@ export class EngineClient {
   }
   setSettings(payload: Commands["settings.set"]) {
     return this.request("settings.set", payload);
-  }
-  refreshSessions() {
-    return this.request("session.list", {});
   }
 }

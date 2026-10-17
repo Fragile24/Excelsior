@@ -1,452 +1,234 @@
 import type {
-  AskReq,
-  Delta,
-  PermissionReq,
-  SessionInfo,
-  SessionUsage,
-  Snapshot,
-  Outcome,
-  WireMessage,
+  ContextStatus, Delta, Interaction, Message, Outcome, PermissionMode, SessionInfo,
+  SessionUsage, Snapshot, WireMessage,
 } from "./protocol";
 import type { ConnectionStatus } from "./engineClient";
-export type BlockRole =
-  "system" | "user" | "assistant" | "reason" | "tool" | "error";
+
 export type Block = {
-  role: BlockRole;
+  role: "user" | "assistant" | "reason" | "tool" | "error" | "context";
   content: string;
   meta?: string;
   args?: string;
+  callId?: string;
+  runId?: string;
+  context?: ContextStatus;
 };
+export type BlockRole = Block["role"];
 export type EngineStatus = ConnectionStatus;
 export const NO_USAGE: SessionUsage = { prompt: 0, completion: 0, total: 0 };
+export type Conversation = {
+  blocks: Block[];
+  running: boolean;
+  runId: string | null;
+  usage: SessionUsage;
+  pending: Interaction | null;
+  outcome: Outcome | null;
+  context: ContextStatus | null;
+  compactQueued: boolean;
+  compactNext: boolean;
+};
+const EMPTY_CONVERSATION: Conversation = {
+  blocks: [], running: false, runId: null, usage: NO_USAGE, pending: null, outcome: null,
+  context: null, compactQueued: false, compactNext: false,
+};
 export type EngineState = {
-  status: EngineStatus;
+  status: ConnectionStatus;
   workspace: string | null;
   sessions: SessionInfo[];
-  blocksBySession: Record<string, Block[]>;
-  streamingBySession: Record<string, boolean>;
-  usageBySession: Record<string, SessionUsage>;
-  asksBySession: Record<string, AskReq>;
-  permsBySession: Record<string, PermissionReq>;
-  runIds: Record<string, string>;
-  outcomes: Record<string, Outcome>;
+  conversations: Record<string, Conversation>;
   activeId: string | null;
-  allowAll: boolean;
-  refreshList: number;
+  permissionMode: PermissionMode;
   error: string | null;
 };
 export function initialEngineState(): EngineState {
   return {
-    status: "disconnected",
-    workspace: null,
-    sessions: [],
-    blocksBySession: {},
-    streamingBySession: {},
-    usageBySession: {},
-    asksBySession: {},
-    permsBySession: {},
-    runIds: {},
-    outcomes: {},
-    activeId: null,
-    allowAll: false,
-    refreshList: 0,
-    error: null,
+    status: "disconnected", workspace: null, sessions: [], conversations: {},
+    activeId: null, permissionMode: "ask", error: null,
   };
+}
+export function activeConversation(state: EngineState): Conversation {
+  return state.conversations[state.activeId ?? ""] ?? EMPTY_CONVERSATION;
 }
 export type EngineAction =
   | { type: "reset" }
-  | { type: "status"; status: EngineStatus }
+  | { type: "status"; status: ConnectionStatus }
   | { type: "active"; id: string | null }
   | { type: "error"; message: string | null }
+  | { type: "compact-next"; workspace: string | null; id: string; enabled: boolean }
   | { type: "server"; msg: WireMessage };
+
 export function reduce(state: EngineState, action: EngineAction): EngineState {
   switch (action.type) {
-    case "reset":
-      return initialEngineState();
-    case "status":
-      return { ...state, status: action.status };
-    case "active":
-      return { ...state, activeId: action.id };
-    case "error":
-      return { ...state, error: action.message };
-    case "server":
-      return reduceServer(state, action.msg);
+    case "reset": return initialEngineState();
+    case "status": return { ...state, status: action.status };
+    case "active": return { ...state, activeId: action.id };
+    case "error": return { ...state, error: action.message };
+    case "compact-next": {
+      const current = state.conversations[action.id];
+      return action.workspace === state.workspace && current && !current.running
+        ? withConversation(state, action.id, { ...current, compactNext: action.enabled }) : state;
+    }
+    case "server": return reduceServer(state, action.msg);
   }
 }
-function isLiveRun(state: EngineState, sessionId: string, runId: string) {
-  return (
-    state.runIds[sessionId] === runId && !!state.streamingBySession[sessionId]
-  );
+
+function withConversation(state: EngineState, id: string, value: Conversation): EngineState {
+  if (state.conversations[id] === value) return state;
+  return { ...state, conversations: { ...state.conversations, [id]: value } };
 }
-
-function isCurrentInteraction(
-  state: EngineState,
-  sessionId: string,
-  interactionId: string,
-) {
-  return (
-    state.asksBySession[sessionId]?.interactionId === interactionId ||
-    state.permsBySession[sessionId]?.interactionId === interactionId
-  );
-}
-
-function switchWorkspace(
-  state: EngineState,
-  workspace: string,
-): EngineState {
-  if (workspace === state.workspace) {
-    return state;
-  }
-  return { ...initialEngineState(), status: state.status, workspace };
-}
-
-function deleteSession(state: EngineState, sid: string): EngineState {
-  return {
-    ...clearInteractions(state, sid),
-    activeId: state.activeId === sid ? null : state.activeId,
-    blocksBySession: withoutKey(state.blocksBySession, sid),
-    usageBySession: withoutKey(state.usageBySession, sid),
-    streamingBySession: withoutKey(state.streamingBySession, sid),
-    runIds: withoutKey(state.runIds, sid),
-    outcomes: withoutKey(state.outcomes, sid),
-  };
-}
-
-type ServerPayload = WireMessage["payload"];
-type ServerHandler = (state: EngineState, payload: never) => EngineState;
-
-const serverHandlers: Record<string, ServerHandler> = {
-  "settings.get": (s, p) => ({
-    ...s,
-    allowAll: (p as { allowAll: boolean }).allowAll,
-  }),
-  "settings.set": (s, p) => ({
-    ...s,
-    allowAll: (p as { allowAll: boolean }).allowAll,
-  }),
-  "interaction.done": (s, p) => {
-    const v = p as { sessionId: string; runId: string; interactionId: string };
-    if (s.runIds[v.sessionId] !== v.runId) {
-      return s;
-    }
-    if (!isCurrentInteraction(s, v.sessionId, v.interactionId)) {
-      return s;
-    }
-    return clearInteractions(s, v.sessionId);
-  },
-  delta: (s, p) => {
-    const v = p as Delta;
-    if (!isLiveRun(s, v.sessionId, v.runId)) {
-      return s;
-    }
-    return applyDelta(s, v.sessionId, v);
-  },
-  done: (s, p) => {
-    const v = p as Outcome;
-    if (s.runIds[v.sessionId] !== v.runId) {
-      return s;
-    }
-    return { ...applyOutcome(s, v), refreshList: s.refreshList + 1 };
-  },
-  error: (s, p) => ({ ...s, error: (p as { error: string }).error }),
-  "session.list": (s, p) => ({
-    ...s,
-    sessions: (p as { sessions: SessionInfo[] }).sessions,
-  }),
-  "session.data": (s, p) => applySnapshot(s, p as Snapshot),
-  "session.create": (s, p) => ({ ...s, activeId: (p as { id: string }).id }),
-  "session.delete": (s, p) => deleteSession(s, (p as { deleted: string }).deleted),
-  "ask.req": (s, p) => {
-    const v = p as AskReq;
-    if (!isLiveRun(s, v.sessionId, v.runId)) {
-      return s;
-    }
-    return { ...s, asksBySession: { ...s.asksBySession, [v.sessionId]: v } };
-  },
-  "permission.req": (s, p) => {
-    const v = p as PermissionReq;
-    if (!isLiveRun(s, v.sessionId, v.runId)) {
-      return s;
-    }
-    return { ...s, permsBySession: { ...s.permsBySession, [v.sessionId]: v } };
-  },
-};
 
 function reduceServer(state: EngineState, msg: WireMessage): EngineState {
-  if (msg.type === "auth") {
-    return state;
-  }
+  if (msg.type === "auth") return state;
   if (msg.type === "workspace.set") {
-    return switchWorkspace(state, msg.payload.workspace);
+    return msg.payload.workspace === state.workspace ? state
+      : { ...initialEngineState(), status: state.status, workspace: msg.payload.workspace };
   }
-  if (msg.workspace !== state.workspace) {
-    return state;
-  }
-  const handle = serverHandlers[msg.type] as
-    | ((s: EngineState, p: ServerPayload) => EngineState)
-    | undefined;
-  return handle ? handle(state, msg.payload) : state;
-}
-function applyOutcome(state: EngineState, o: Outcome): EngineState {
-  let next = withStreaming(
-    clearInteractions(state, o.sessionId),
-    o.sessionId,
-    false,
-  );
-  next = { ...next, outcomes: { ...next.outcomes, [o.sessionId]: o } };
-  if (o.status !== "succeeded") {
-    next = withBlocks(next, o.sessionId, [
-      ...(next.blocksBySession[o.sessionId] ?? []),
-      {
-        role: "error",
-        content:
-          o.status === "persistence_failed"
-            ? "History was not saved. " + (o.error ?? "")
-            : (o.error ?? o.status),
-      },
-    ]);
-  }
-  return next;
-}
-function collectToolArgs(messages: Snapshot["messages"]) {
-  const argsById = new Map<string, string>();
-  for (const m of messages) {
-    for (const tc of m.tool_calls ?? []) {
-      argsById.set(tc.id, tc.function.arguments);
+  if (msg.workspace !== state.workspace) return state;
+  switch (msg.type) {
+    case "settings.get":
+    case "settings.set":
+      return { ...state, permissionMode: msg.payload.permission };
+    case "session.list":
+      return { ...state, sessions: msg.payload.sessions };
+    case "session.data": {
+      const next = fromSnapshot(msg.payload);
+      next.compactNext = !next.running && (state.conversations[msg.payload.id]?.compactNext ?? false);
+      return withConversation(state, msg.payload.id, next);
     }
+    case "session.delete": {
+      const id = msg.payload.deleted;
+      const conversations = { ...state.conversations };
+      delete conversations[id];
+      return {
+        ...state, conversations,
+        sessions: state.sessions.filter((s) => s.id !== id),
+        activeId: state.activeId === id ? null : state.activeId,
+      };
+    }
+    case "error":
+      return { ...state, error: msg.payload.error };
+    case "delta":
+    case "done":
+    case "ask.req":
+    case "permission.req":
+    case "interaction.done": {
+      const p = msg.payload;
+      const current = state.conversations[p.sessionId];
+      if (!current || current.runId !== p.runId) return state;
+      switch (msg.type) {
+        case "delta":
+          return current.running ? withConversation(state, p.sessionId, applyDelta(current, msg.payload)) : state;
+        case "done":
+          return withConversation(state, p.sessionId, applyOutcome(current, msg.payload));
+        case "ask.req":
+        case "permission.req":
+          return current.running ? withConversation(state, p.sessionId, { ...current, pending: msg }) : state;
+        case "interaction.done":
+          return current.pending?.payload.interactionId === msg.payload.interactionId
+            ? withConversation(state, p.sessionId, { ...current, pending: null }) : state;
+      }
+    }
+    default:
+      return state;
   }
-  return argsById;
 }
 
-function isDisplayable(m: Snapshot["messages"][number]) {
-  if (m.role === "system") {
-    return false;
-  }
-  if (m.role === "assistant" && !m.content && m.tool_calls?.length) {
-    return false;
-  }
-  return true;
+function snapshotBlocks(messages: Message[]): Block[] {
+  const args = new Map<string, string>();
+  return messages.flatMap((m): Block[] => {
+    for (const call of m.tool_calls ?? []) args.set(call.id, call.function.arguments);
+    if (m.role === "system") return [];
+    if (m.role === "tool") {
+      return [{ role: "tool", content: m.content ?? "", meta: m.name, args: args.get(m.tool_call_id ?? ""), callId: m.tool_call_id }];
+    }
+    if (m.role === "user") return [{ role: "user", content: m.content ?? "" }];
+    const blocks: Block[] = [];
+    if (m.reasoning_content) blocks.push({ role: "reason", content: m.reasoning_content });
+    if (m.content) blocks.push({ role: "assistant", content: m.content });
+    return blocks;
+  });
 }
 
-function messageToBlock(
-  m: Snapshot["messages"][number],
-  argsById: Map<string, string>,
-): Block {
-  if (m.role === "tool") {
-    return {
-      role: "tool",
-      content: m.content ?? "",
-      meta: m.name,
-      args: argsById.get(m.tool_call_id ?? ""),
-    };
-  }
-  if (m.role === "user") {
-    return { role: "user", content: m.content ?? "" };
-  }
-  return { role: "assistant", content: m.content ?? "" };
-}
-
-function snapshotBlocks(messages: Snapshot["messages"]): Block[] {
-  const argsById = collectToolArgs(messages);
-  return messages.filter(isDisplayable).map((m) => messageToBlock(m, argsById));
-}
-
-function applyPending(
-  state: EngineState,
-  sid: string,
-  pending: Snapshot["pending"],
-): EngineState {
-  if (pending?.type === "ask.req") {
-    return {
-      ...state,
-      asksBySession: { ...state.asksBySession, [sid]: pending.payload as AskReq },
-    };
-  }
-  if (pending?.type === "permission.req") {
-    return {
-      ...state,
-      permsBySession: {
-        ...state.permsBySession,
-        [sid]: pending.payload as PermissionReq,
-      },
-    };
-  }
-  return state;
-}
-
-function applySnapshot(state: EngineState, p: Snapshot): EngineState {
-  const sid = p.id;
-  let next: EngineState = {
-    ...state,
-    activeId: state.activeId ?? sid,
-    runIds: { ...state.runIds, [sid]: p.runId ?? "" },
-    usageBySession: { ...state.usageBySession, [sid]: NO_USAGE },
-    outcomes: withoutKey(state.outcomes, sid),
+function fromSnapshot(p: Snapshot): Conversation {
+  let current: Conversation = {
+    blocks: snapshotBlocks(p.messages), running: p.running, runId: p.runId ?? null,
+    usage: NO_USAGE, pending: p.pending ?? null, outcome: null,
+    context: null, compactQueued: false, compactNext: false,
   };
-  next = clearInteractions(next, sid);
-  next = withBlocks(next, sid, snapshotBlocks(p.messages));
-  for (const d of p.events ?? []) {
-    next = applyDelta(next, sid, d);
-  }
-  next = withStreaming(next, sid, p.running);
-  next = applyPending(next, sid, p.pending);
-  if (p.outcome) {
-    next = applyOutcome(next, p.outcome);
-  }
+  for (const event of p.events ?? []) current = applyDelta(current, event);
+  if (p.outcome) current = applyOutcome(current, p.outcome);
   if (p.projectionUnavailable) {
-    next = withBlocks(next, sid, [
-      ...(next.blocksBySession[sid] ?? []),
-      { role: "error", content: "Unsaved output is no longer available." },
-    ]);
+    current = { ...current, blocks: [...current.blocks, { role: "error", content: "Unsaved output is no longer available." }] };
   }
-  return next;
+  return current;
 }
 
-function isUnfinishedTool(last: Block | undefined, toolName?: string) {
-  return last?.role === "tool" && last.meta === toolName && last.args === undefined;
-}
-
-function appendToolArgs(state: EngineState, sid: string, d: Delta): EngineState {
-  const cur = state.blocksBySession[sid] ?? [];
-  if (isUnfinishedTool(cur[cur.length - 1], d.toolName)) {
-    const last = cur[cur.length - 1];
-    const merged = { ...last, content: last.content + (d.toolArgs ?? "") };
-    return withBlocks(state, sid, [...cur.slice(0, -1), merged]);
-  }
-  return withBlocks(state, sid, [
-    ...cur,
-    { role: "tool", content: d.toolArgs ?? "", meta: d.toolName },
-  ]);
-}
-
-function completeTool(state: EngineState, sid: string, d: Delta): EngineState {
-  const cur = state.blocksBySession[sid] ?? [];
-  if (d.toolName && isUnfinishedTool(cur[cur.length - 1], d.toolName)) {
-    const last = cur[cur.length - 1];
-    const merged = {
-      ...last,
-      args: last.content,
-      content: d.toolResult ?? "",
-      meta: d.toolName,
-    };
-    return withBlocks(state, sid, [...cur.slice(0, -1), merged]);
-  }
-  return withBlocks(state, sid, [
-    ...cur,
+function applyOutcome(current: Conversation, outcome: Outcome): Conversation {
+  if (current.outcome?.runId === outcome.runId) return current;
+  let blocks: Block[] = outcome.status === "succeeded" ? current.blocks : [
+    ...current.blocks,
     {
-      role: "tool",
-      content: d.toolResult ?? "",
-      meta: d.toolName ? `${d.toolName} →` : undefined,
+      role: "error",
+      content: outcome.status === "persistence_failed"
+        ? "History was not saved. " + (outcome.error ?? "") : (outcome.error ?? outcome.status),
     },
-  ]);
+  ];
+  if (current.compactQueued) blocks = [...blocks, { role: "context", content: "Compaction was not applied", meta: "The run ended before the next model step. You can queue it for your next message." }];
+  return { ...current, blocks, running: false, pending: null, compactQueued: false, outcome };
 }
 
-function addUsage(state: EngineState, sid: string, d: Delta): EngineState {
-  if (!d.totalTokens && !d.promptTokens && !d.completionTokens) {
-    return state;
+function appendBlock(blocks: Block[], block: Block): Block[] {
+  const last = blocks[blocks.length - 1];
+  return last?.role === block.role && last.meta === block.meta
+    ? [...blocks.slice(0, -1), { ...last, content: last.content + block.content }]
+    : [...blocks, block];
+}
+
+function applyDelta(current: Conversation, d: Delta): Conversation {
+  if (d.type === "compact_queued") return { ...current, compactQueued: true };
+  if (d.type === "context" && d.context) {
+    const context = d.context;
+    const finished = context.state === "compacted" || (context.state === "unchanged" && context.reason === "manual");
+    const block: Block = {
+      role: "context", content: context.state === "compacted" ? "Context compacted" : "Context unchanged",
+      context, runId: d.runId,
+    };
+    return {
+      ...current, context,
+      compactQueued: context.reason === "manual" && context.state !== "compacting" ? false : current.compactQueued,
+      blocks: finished ? [...current.blocks, block] : current.blocks,
+    };
   }
-  const u = state.usageBySession[sid] ?? NO_USAGE;
-  return {
-    ...state,
-    usageBySession: {
-      ...state.usageBySession,
-      [sid]: {
+  if (d.type === "generation" || d.type === "done") {
+    const u = current.usage;
+    return {
+      ...current,
+      usage: {
         prompt: u.prompt + (d.promptTokens ?? 0),
         completion: u.completion + (d.completionTokens ?? 0),
-        total:
-          u.total +
-          (d.totalTokens ?? (d.promptTokens ?? 0) + (d.completionTokens ?? 0)),
+        total: u.total + (d.totalTokens ?? (d.promptTokens ?? 0) + (d.completionTokens ?? 0)),
       },
-    },
-  };
-}
-
-const deltaHandlers: Record<string, (s: EngineState, sid: string, d: Delta) => EngineState> = {
-  text: (s, sid, d) =>
-    appendBlock(s, sid, { role: "assistant", content: d.text ?? "" }),
-  reasoning: (s, sid, d) =>
-    appendBlock(s, sid, { role: "reason", content: d.reasoning ?? "" }),
-  tool_start: appendToolArgs,
-  tool_result: completeTool,
-  error: (s, sid, d) =>
-    appendBlock(s, sid, { role: "error", content: d.text ?? "" }),
-  generation: addUsage,
-  done: addUsage,
-};
-
-function applyDelta(state: EngineState, sid: string, d: Delta): EngineState {
-  if (!sid) {
-    return state;
+    };
   }
-  return (deltaHandlers[d.type] ?? ((s) => withStreaming(s, sid, true)))(
-    state,
-    sid,
-    d,
-  );
-}
-
-// appendBlock merges into the last block when role and meta match.
-function appendBlock(
-  state: EngineState,
-  sid: string,
-  block: Block,
-): EngineState {
-  const cur = state.blocksBySession[sid] ?? [];
-  const last = cur[cur.length - 1];
-  if (last?.role === block.role && last.meta === block.meta) {
-    const merged = { ...last, content: last.content + block.content };
-    return withBlocks(state, sid, [...cur.slice(0, -1), merged]);
+  if (d.type === "tool_start" || d.type === "tool_result") {
+    const blocks = [...current.blocks];
+    const index = d.toolCallID
+      ? blocks.findIndex((b) => b.role === "tool" && b.runId === d.runId && b.callId === d.toolCallID)
+      : blocks.findLastIndex((b) => b.role === "tool" && b.runId === d.runId && b.meta === d.toolName && b.args === undefined);
+    const previous = blocks[index];
+    const block: Block = d.type === "tool_start"
+      ? { role: "tool", meta: d.toolName, callId: d.toolCallID, runId: d.runId, content: (previous?.content ?? "") + (d.toolArgs ?? "") }
+      : { role: "tool", meta: d.toolName, callId: d.toolCallID, runId: d.runId, args: previous?.content ?? "", content: d.toolResult ?? "" };
+    if (index < 0) blocks.push(block);
+    else blocks[index] = block;
+    return { ...current, blocks };
   }
-  return withBlocks(state, sid, [...cur, block]);
-}
-
-function withBlocks(
-  state: EngineState,
-  sid: string,
-  blocks: Block[],
-): EngineState {
-  return {
-    ...state,
-    blocksBySession: { ...state.blocksBySession, [sid]: blocks },
-  };
-}
-
-function withStreaming(
-  state: EngineState,
-  sid: string | undefined,
-  on: boolean,
-): EngineState {
-  if (!sid) {
-    return state;
+  let block: Block;
+  switch (d.type) {
+    case "text": block = { role: "assistant", content: d.text ?? "" }; break;
+    case "reasoning": block = { role: "reason", content: d.reasoning ?? "" }; break;
+    case "error": block = { role: "error", content: d.text ?? "" }; break;
+    default: return current;
   }
-  const next = { ...state.streamingBySession };
-  if (on) {
-    next[sid] = true;
-  } else {
-    delete next[sid];
-  }
-  return { ...state, streamingBySession: next };
-}
-
-function clearInteractions(
-  state: EngineState,
-  sid: string | undefined,
-): EngineState {
-  if (!sid) {
-    return state;
-  }
-  const asks = { ...state.asksBySession };
-  const perms = { ...state.permsBySession };
-  delete asks[sid];
-  delete perms[sid];
-  return { ...state, asksBySession: asks, permsBySession: perms };
-}
-
-function withoutKey<T>(rec: Record<string, T>, key: string): Record<string, T> {
-  if (!(key in rec)) {
-    return rec;
-  }
-  const next = { ...rec };
-  delete next[key];
-  return next;
+  return block.content ? { ...current, blocks: appendBlock(current.blocks, block) } : current;
 }

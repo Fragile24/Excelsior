@@ -23,18 +23,24 @@ type Service struct {
 
 // PreparedTurn contains pre-loaded history and record for single-load execution.
 type PreparedTurn struct {
-	SessionID string
-	RunID     string
-	Messages  []llm.Message
-	Record    session.Record
-	OnEvent   func(Event)
-	OnPersist func() error
+	SessionID       string
+	RunID           string
+	Messages        []llm.Message
+	Record          session.Record
+	OnEvent         func(Event)
+	OnPersist       func() error
+	ReasoningEffort llm.ReasoningEffort
+	Compact         bool
+	CompactRequests <-chan struct{}
 }
 
 // RunPrepared executes the turn using already loaded history and updates the provided record.
 func (s Service) RunPrepared(ctx context.Context, turn PreparedTurn) (*agent.RunResult, error) {
 	result, err := s.Runner.RunWithHistory(ctx, agent.RunOptions{
-		Messages: turn.Messages,
+		Messages:        turn.Messages,
+		ReasoningEffort: turn.ReasoningEffort,
+		Compact:         turn.Compact,
+		CompactRequests: turn.CompactRequests,
 		OnEvent: func(event agent.StreamEvent) {
 			if turn.OnEvent != nil {
 				if event.Type == "done" {
@@ -52,6 +58,7 @@ func (s Service) RunPrepared(ctx context.Context, turn PreparedTurn) (*agent.Run
 					ToolResult:   event.ToolResult,
 					FinishReason: event.FinishReason,
 					Usage:        event.Usage,
+					Context:      event.Context,
 				})
 			}
 		},
@@ -87,18 +94,6 @@ func (s Service) RunPrepared(ctx context.Context, turn PreparedTurn) (*agent.Run
 		return result, fmt.Errorf("%w: %v", ErrPersistenceFailed, saveErr)
 	}
 	return result, nil
-}
-
-// historyFrom strips placeholder system messages from a stored record.
-func historyFrom(record session.Record) []llm.Message {
-	var history []llm.Message
-	for _, message := range record.Messages {
-		if message.Role == "system" && (message.Content == "New session" || message.Content == "(empty)") {
-			continue
-		}
-		history = append(history, message)
-	}
-	return history
 }
 
 func withoutSystemMessages(messages []llm.Message) []llm.Message {

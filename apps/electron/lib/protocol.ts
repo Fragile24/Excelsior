@@ -19,10 +19,35 @@ export type Message = {
     function: { name: string; arguments: string };
   }[];
 };
+export type ReasoningEffort = "none" | "low" | "high" | "max";
 export type ChatReq = {
   sessionId?: string;
   model: string;
+  reasoningEffort?: ReasoningEffort;
   messages: Message[];
+  compact?: boolean;
+};
+export type ContextStatus = {
+  model: string;
+  state: "ready" | "compacting" | "compacted" | "unchanged" | "error";
+  reason: "automatic" | "manual";
+  inputTokens: number;
+  inputBudget: number;
+  outputReserve: number;
+  windowTokens: number;
+  softLimit: number;
+  hardLimit: number;
+  tier: number;
+  canCompact: boolean;
+  beforeTokens: number;
+  compactions: number;
+  breakdown?: {
+    system: number;
+    tools: number;
+    user: number;
+    assistant: number;
+  };
+  error?: string;
 };
 export type Delta = {
   runId: string;
@@ -38,6 +63,7 @@ export type Delta = {
   promptTokens?: number;
   completionTokens?: number;
   totalTokens?: number;
+  context?: ContextStatus;
 };
 export type SessionUsage = {
   prompt: number;
@@ -78,7 +104,15 @@ export type SessionInfo = {
   added?: number;
   deleted?: number;
 };
-export type SettingsGetResp = { permission: string; allowAll: boolean };
+export type WorktreeInfo = {
+  path: string;
+  branch?: string;
+  head?: string;
+  main: boolean;
+  current: boolean;
+};
+export type PermissionMode = "ask" | "allow" | "deny";
+export type SettingsGetResp = { permission: PermissionMode };
 export type SettingsSetResp = SettingsGetResp;
 export type Outcome = {
   sessionId: string;
@@ -88,13 +122,16 @@ export type Outcome = {
   error?: string;
   code?: string;
 };
+export type Interaction =
+  | (Envelope<AskReq> & { type: "ask.req" })
+  | (Envelope<PermissionReq> & { type: "permission.req" });
 export type Snapshot = {
   id: string;
   runId?: string;
   running: boolean;
   messages: Message[];
   events?: Delta[];
-  pending?: Envelope<AskReq | PermissionReq>;
+  pending?: Interaction;
   outcome?: Outcome;
   unsavedAvailable: boolean;
   projectionUnavailable: boolean;
@@ -103,6 +140,8 @@ export type Responses = {
   auth: { ok: boolean; workspace: string; capabilities: string[] };
   "workspace.set": { workspace: string };
   "workspace.status": { branch: string };
+  "worktree.list": { worktrees: WorktreeInfo[] };
+  "worktree.create": WorktreeInfo;
   "session.list": { sessions: SessionInfo[] };
   "session.data": Snapshot;
   "session.create": { id: string };
@@ -110,6 +149,7 @@ export type Responses = {
   "session.rename": { id: string; title: string };
   "session.unsubscribe": { id: string };
   "chat.cancel": { sessionId: string; runId: string; accepted: boolean };
+  "chat.compact": { sessionId: string; runId: string; accepted: boolean };
   "ask.resp": { accepted: boolean };
   "permission.resp": { accepted: boolean };
   "settings.get": SettingsGetResp;
@@ -132,9 +172,11 @@ export type WireMessage = {
 export type Commands = {
   "workspace.set": { workspace: string };
   "workspace.status": Record<string, never>;
+  "worktree.list": Record<string, never>;
+  "worktree.create": { branch: string };
   "session.list": Record<string, never>;
   "settings.get": Record<string, never>;
-  "settings.set": { permission?: string; allowAll?: boolean };
+  "settings.set": { permission?: PermissionMode };
   "session.create": { title?: string };
   "session.data": { id: string };
   "session.delete": { id: string };
@@ -143,6 +185,7 @@ export type Commands = {
   "session.unsubscribe": { id: string };
   "chat.req": ChatReq;
   "chat.cancel": { sessionId: string; runId: string };
+  "chat.compact": { sessionId: string; runId: string };
   "ask.resp": AskResp;
   "permission.resp": PermissionResp;
 };
@@ -212,6 +255,27 @@ function delta(v: unknown) {
       (typeof p[k] !== "number" || !Number.isFinite(p[k]) || p[k] < 0)
     )
       throw new Error("Invalid token usage");
+  if (p.type === "context" || p.context !== undefined) {
+    const c = object(p.context);
+    strings(c, ["model", "state", "reason"]);
+    strings(c, ["error"], true);
+    bools(c, ["canCompact"]);
+    for (const key of ["inputTokens", "inputBudget", "outputReserve", "windowTokens", "softLimit", "hardLimit", "tier", "beforeTokens", "compactions"])
+      if (!Number.isSafeInteger(c[key]) || Number(c[key]) < 0) throw new Error("Invalid context count: " + key);
+    if (c.breakdown !== undefined) {
+      const breakdown = object(c.breakdown);
+      for (const key of ["system", "tools", "user", "assistant"])
+        if (!Number.isSafeInteger(breakdown[key]) || Number(breakdown[key]) < 0) throw new Error("Invalid context breakdown: " + key);
+      if ([breakdown.system, breakdown.tools, breakdown.user, breakdown.assistant].reduce<number>((sum, value) => sum + Number(value), 0) !== Number(c.inputTokens))
+        throw new Error("Context breakdown must match input tokens");
+    }
+    if (Number(c.inputBudget) <= 0 || Number(c.outputReserve) <= 0 ||
+        Number(c.inputBudget) + Number(c.outputReserve) !== c.windowTokens ||
+        Number(c.softLimit) > Number(c.hardLimit) || Number(c.hardLimit) > Number(c.inputBudget) ||
+        Number(c.tier) > 4 ||
+        !["ready", "compacting", "compacted", "unchanged", "error"].includes(String(c.state)) ||
+        !["automatic", "manual"].includes(String(c.reason))) throw new Error("Invalid context budget");
+  }
 }
 function interaction(type: string, v: unknown) {
   const p = object(v);
@@ -291,6 +355,19 @@ export function decodeMessage(raw: string): WireMessage {
     case "workspace.status":
       strings(p, ["branch"]);
       break;
+    case "worktree.list":
+      for (const v of array(p.worktrees)) {
+        const worktree = object(v);
+        strings(worktree, ["path"]);
+        strings(worktree, ["branch", "head"], true);
+        bools(worktree, ["main", "current"]);
+      }
+      break;
+    case "worktree.create":
+      strings(p, ["path"]);
+      strings(p, ["branch", "head"], true);
+      bools(p, ["main", "current"]);
+      break;
     case "session.list":
       for (const v of array(p.sessions)) {
         const s = object(v);
@@ -315,9 +392,9 @@ export function decodeMessage(raw: string): WireMessage {
     case "settings.get":
     case "settings.set":
       strings(p, ["permission"]);
-      bools(p, ["allowAll"]);
       break;
     case "chat.cancel":
+    case "chat.compact":
       identity(p);
       bools(p, ["accepted"]);
       break;

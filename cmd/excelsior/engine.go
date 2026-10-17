@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -19,8 +20,6 @@ import (
 func newEngineCommand(cfg config.Config, workspaceFlag *string) *cobra.Command {
 	var addr string
 	var parentPipe bool
-	var dbPath string
-	var authEnabled bool
 	var origins []string
 	cmd := &cobra.Command{
 		Use:   "engine",
@@ -29,15 +28,11 @@ func newEngineCommand(cfg config.Config, workspaceFlag *string) *cobra.Command {
 
   excelsior engine --workspace .`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if cmd.Flags().Changed("auth") || cmd.Flags().Changed("db") {
-				return fmt.Errorf("--auth and --db were retired; the engine uses an owner token and JSON sessions")
-			}
-			// Runtime-only flag override (--yolo / --permission); persisted
+			applyHarnessFlags(&cfg, cmd)
+			// Runtime-only permission override; persisted
 			// permission is resolved per-request from LoadSettings.
 			var override config.PermissionMode
-			if v, _ := cmd.Root().PersistentFlags().GetBool("yolo"); v {
-				override = config.PermissionAllow
-			} else if v, _ := cmd.Root().PersistentFlags().GetString("permission"); v != "" {
+			if v, _ := cmd.Root().PersistentFlags().GetString("permission"); v != "" {
 				if pm, err := config.ParsePermissionMode(v); err == nil {
 					override = pm
 				}
@@ -51,6 +46,9 @@ func newEngineCommand(cfg config.Config, workspaceFlag *string) *cobra.Command {
 			}
 			// Validate config (needs API key for LLM)
 			if err := cfg.Validate(); err != nil {
+				if !errors.Is(err, config.ErrMissingAPIKey) {
+					return err
+				}
 				slog.Warn("engine config", "err", err)
 			}
 			h := engine.NewHub(cfg, ws)
@@ -61,7 +59,6 @@ func newEngineCommand(cfg config.Config, workspaceFlag *string) *cobra.Command {
 				return err
 			}
 			h.Addr = addr
-			h.Logger = slog.Default()
 			h.PermissionOverride = override
 			token, err := engine.OwnerToken(false)
 			if err != nil {
@@ -79,10 +76,6 @@ func newEngineCommand(cfg config.Config, workspaceFlag *string) *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&parentPipe, "parent-pipe", false, "Stop when the owning desktop closes stdin")
 	cmd.Flags().StringVar(&addr, "addr", "127.0.0.1:17812", "Listen address for WS hub (e.g. :17812)")
-	cmd.Flags().BoolVar(&authEnabled, "auth", false, "Retired: owner-token authentication is always required")
-	cmd.Flags().StringVar(&dbPath, "db", "", "Retired: sessions use workspace JSON files")
-	_ = cmd.Flags().MarkHidden("auth")
-	_ = cmd.Flags().MarkHidden("db")
 	cmd.Flags().StringSliceVar(&origins, "origin", []string{"null", "excelsior://desktop", "http://localhost:3000"}, "Allowed browser origins (repeat or comma-separate)")
 	cmd.AddCommand(&cobra.Command{Use: "token", Short: "Print the owner token (keep private)", RunE: func(cmd *cobra.Command, args []string) error {
 		token, err := engine.OwnerToken(false)

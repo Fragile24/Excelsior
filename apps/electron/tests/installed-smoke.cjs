@@ -39,7 +39,7 @@ async function main(){
   await until(()=>evaluate('!document.querySelector(\'button[aria-label="Send message"]\')?.disabled'),"ready composer");
   await evaluate('document.querySelector(\'button[aria-label="Send message"]\').click()');
   await until(()=>evaluate('document.body.innerText.includes("Smoke answer saved successfully")'),"rendered response");
-  await until(()=>{const dir=path.join(workspace,".excelsior","sessions");return fs.existsSync(dir)&&fs.readdirSync(dir).filter(f=>f.endsWith(".jsonl")).some(f=>fs.readFileSync(path.join(dir,f),"utf8").includes("Smoke answer saved successfully"));},"durable result");
+  await until(()=>{const dir=path.join(workspace,".excelsior","sessions");return fs.existsSync(dir)&&fs.readdirSync(dir).filter(f=>f.endsWith(".json")).some(f=>fs.readFileSync(path.join(dir,f),"utf8").includes("Smoke answer saved successfully"));},"durable result");
   await evaluate('[...document.querySelectorAll("button")].find(b=>b.getAttribute("aria-label")==="New session in workspace").click()');
   await until(()=>evaluate('!!document.querySelector("textarea") && !document.body.innerText.includes("Smoke answer saved successfully")'),"populated to empty transcript");
   assert.deepEqual(errors,[],"renderer exceptions");

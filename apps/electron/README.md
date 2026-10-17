@@ -2,6 +2,12 @@
 
 Electron loads a static Next.js frontend and connects to the personal Go engine over WebSocket. The Go engine owns work and history; the UI can reconnect to an active run.
 
+## Frontend ownership
+
+`EngineClient` owns the socket, correlated commands, selection and reconnect restoration. `useEngine` connects it to React through one command executor. The pure reducer in `engineState` keeps one conversation record per session: blocks, run identity, usage, pending interaction and outcome. Snapshots replace complete records; live updates must match both workspace and run. Tool results match their call IDs, including parallel calls to the same tool.
+
+`page` composes the UI from that state. The sidebar receives session metadata and workspace paths directly, while workspace names are derived from paths. `usePreferences` owns local theme and workspace history. The transcript owns scrolling, and the settings dialog uses native modal focus and Escape handling.
+
 ## Development
 
 From the repository root, build the engine:

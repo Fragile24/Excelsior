@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useCallback, useState } from "react";
-import { HelpCircle, Send } from "lucide-react";
+import { HelpCircle, Send } from "./phosphor-icons";
 import type { AskReq } from "../lib/protocol";
 
 type AskDialogProps = {

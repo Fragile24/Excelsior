@@ -9,8 +9,9 @@ import {
   Lightbulb,
   ShieldAlert,
   Square,
-} from "lucide-react";
+} from "./phosphor-icons";
 import CodeBlock from "./CodeBlock";
+import { BrandMark } from "./Icons";
 import { parseChunks, parseMarkdownBlocks, type AlertType, type BlockToken, type TableAlign } from "../lib/markdown";
 
 type Role = "user" | "assistant" | "system" | "tool" | "reason" | "error";
@@ -371,8 +372,8 @@ function RenderBlocks({ blocks }: { blocks: BlockToken[] }) {
 
 function UserBubble({ text }: { text: string }) {
   return (
-    <div className="flex justify-end my-2.5 animate-appear">
-      <div className="max-w-[85%] px-3.5 py-2 rounded-xl bg-[var(--bubble-user)] border-subtle text-[13px] leading-relaxed selectable-text whitespace-pre-wrap text-[var(--text-main)]">
+    <div className="user-message flex justify-end animate-appear">
+      <div className="user-message-content selectable-text whitespace-pre-wrap">
         {text}
       </div>
     </div>
@@ -447,7 +448,7 @@ function ToolBlock({ content, meta, args: rawArgs }: { content: string; meta?: s
         )}
         {isExecuting && (
           <span className="flex items-center gap-1.5 text-[10px] text-amber-400 font-medium">
-            <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+            <span className="w-1.5 h-1.5 rounded-full bg-amber-400 studio-motion-loop" />
             running
           </span>
         )}
@@ -524,6 +525,7 @@ function MarkdownRenderer({ content = "", role, meta, args, isStreaming }: Markd
   if (role === "tool") return <ToolBlock content={text} meta={meta} args={args} />;
   if (role === "reason") return <ReasonBlock text={text} />;
   if (role === "error") {
+    if (text === "canceled") return <div className="run-stopped" role="status"><Square size={11} aria-hidden="true" />Stopped. Pick up where you left off.</div>;
     return (
       <div className="my-2.5 px-3.5 py-2.5 rounded-xl bg-rose-500/10 border-subtle text-rose-400 text-xs font-mono animate-appear">
         Error: {text}
@@ -532,7 +534,8 @@ function MarkdownRenderer({ content = "", role, meta, args, isStreaming }: Markd
   }
 
   return (
-    <div className="my-4 selectable-text animate-appear">
+    <div className="assistant-message selectable-text animate-appear">
+      {role === "assistant" && <div className="assistant-identity"><BrandMark /><span>Excelsior</span></div>}
       <div className="space-y-2">
         {chunks.map((chunk, index) => {
           if (chunk.type === "code") {
@@ -542,7 +545,7 @@ function MarkdownRenderer({ content = "", role, meta, args, isStreaming }: Markd
           return <RenderBlocks key={index} blocks={blocks} />;
         })}
         {isStreaming && (
-          <span className="inline-block w-2 h-4 bg-[var(--accent)] animate-pulse ml-1 align-middle" aria-hidden />
+          <span className="inline-block w-2 h-4 bg-[var(--accent)] studio-motion-loop ml-1 align-middle" aria-hidden />
         )}
       </div>
     </div>

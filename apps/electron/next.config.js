@@ -7,13 +7,14 @@ const isProd = process.env.NODE_ENV === "production";
 // - assetPrefix: "./" makes all _next/ assets relative so file:// works
 // - trailingSlash: true ensures directories resolve predictably on file://
 // - images.unoptimized: true disables Next Image optimization server
-// In dev (next dev) we keep output undefined for HMR.
+// Development uses its own cache so production builds cannot remove live dev assets.
 const nextConfig = {
   output: isProd ? "export" : undefined,
-  distDir: "dist",
+  distDir: isProd ? "dist" : ".next",
   assetPrefix: isProd ? "./" : undefined,
   trailingSlash: true,
   images: { unoptimized: true },
+  experimental: { optimizePackageImports: ["@phosphor-icons/react"] },
   // Disable React strict double-invoke noise for streaming deltas in dev
   reactStrictMode: false,
 };

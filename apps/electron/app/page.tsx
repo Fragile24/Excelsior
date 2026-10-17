@@ -1,338 +1,288 @@
 "use client";
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { PanelLeft } from "lucide-react";
+import React, { useCallback, useEffect, useState } from "react";
+import { ArrowRight, ArrowUpRight, MessageSquare, PanelLeft } from "../components/phosphor-icons";
 import Sidebar from "../components/Sidebar";
 import Composer from "../components/Composer";
-import SettingsModal from "../components/SettingsModal";
+import ContextControl from "../components/ContextControl";
+import SettingsPage, { type SettingsValues } from "../components/SettingsPage";
 import MenuBar from "../components/MenuBar";
 import AskDialog from "../components/AskDialog";
 import Transcript from "../components/Transcript";
 import { useEngine } from "../lib/useEngine";
-import { cleanTitle, formatTimeAgo } from "../lib/format";
-import { DEFAULT_MODEL, DEFAULT_PROJECT, ENGINE_URL_FALLBACK, STORAGE_KEYS } from "../lib/constants";
-import { useThemeContext } from "../contexts/ThemeContext";
-import { useKnownFolders } from "../hooks/useKnownFolders";
+import { usePreferences } from "../lib/usePreferences";
+import { formatTimeAgo, workspaceName } from "../lib/format";
+import { DEFAULT_MODEL, ENGINE_URL_FALLBACK } from "../lib/constants";
 import { ErrorBoundary } from "../components/ErrorBoundary";
-import type { FolderWorkspace } from "../components/Sidebar";
-
-const SUGGESTIONS = [
-  {
-    label: "Explore architecture",
-    desc: "Map project structure, dependencies, and flow",
-    prompt: "Inspect this project and explain the overall architecture, folder structure, and tech stack.",
-  },
-  {
-    label: "Find potential issues",
-    desc: "Scan recent files for bugs or unhandled errors",
-    prompt: "Review the current codebase for potential bugs, unhandled errors, or logic issues.",
-  },
-  {
-    label: "Generate unit tests",
-    desc: "Create tests for core modules and paths",
-    prompt: "Identify the critical paths in this project and generate unit tests for them.",
-  },
-  {
-    label: "Check project health",
-    desc: "Run git status and build verification",
-    prompt: "Run git status and run the project test or build command to verify project health.",
-  },
-] as const;
-
-function useDesktop(): boolean | null {
-  const [isDesktop, setIsDesktop] = useState<boolean | null>(null);
-  useEffect(() => {
-    setIsDesktop(typeof window !== "undefined" && !!(window as unknown as { electronAPI?: unknown }).electronAPI);
-  }, []);
-  return isDesktop;
-}
+import type { PermissionMode, WorktreeInfo } from "../lib/protocol";
 
 export default function Page() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const closeSettings = useCallback(() => setSettingsOpen(false), []);
+  const [settingsNavOpen, setSettingsNavOpen] = useState(true);
   const [model, setModel] = useState(DEFAULT_MODEL);
-  const [projectName, setProjectName] = useState(DEFAULT_PROJECT);
-  const [engineUrl, setEngineUrl] = useState(ENGINE_URL_FALLBACK);
+  const [engineUrl, setEngineUrl] = useState("");
+  const [worktrees, setWorktrees] = useState<WorktreeInfo[]>([]);
+  const { state, conversation, run, reconnect, reportError, setCompactNext } = useEngine(engineUrl);
+  const { theme, setTheme, accentColor, setAccentColor, surfaceColor, setSurfaceColor, transcriptSize, setTranscriptSize, reasoningEffort, setReasoningEffort, workspaces } = usePreferences(state.workspace);
+  const { blocks, running: streaming, pending, usage } = conversation;
+  const ask = pending?.type === "ask.req" ? pending.payload : null;
+  const permission = pending?.type === "permission.req" ? pending.payload : null;
+  const activeSession = state.sessions.find((s) => s.id === state.activeId);
+  const openSettings = useCallback(() => setSettingsOpen(true), []);
+  const toggleSidebar = useCallback(() => setSidebarOpen((open) => !open), []);
+  const toggleSettingsNav = useCallback(() => setSettingsNavOpen((open) => !open), []);
 
-  const { theme, setTheme } = useThemeContext();
-  const { knownFolders, setKnownFolders } = useKnownFolders();
-
-  const {
-    wsState,
-    sessions,
-    blocks,
-    streaming,
-    ask,
-    permission,
-    activeId,
-    selectSession,
-    createSession,
-    setWorkspace,
-    deleteSession,
-    renameSession,
-    setSettings,
-    error,
-    workspace,
-    allowAll,
-    usage,
-    pushLocal,
-    startChat,
-    cancelRun,
-    replyAsk,
-    replyPermission,
-  } = useEngine(engineUrl);
-
-  const isDesktop = useDesktop();
-  const transcriptRef = useRef<HTMLDivElement>(null);
-
-  // Hydrate persisted state (once)
   useEffect(() => {
-    window.electronAPI?.getEngineUrl?.().then((url: string) => {
-      if (url) setEngineUrl(url);
-    });
+    if (window.matchMedia("(max-width: 720px)").matches) setSidebarOpen(false);
   }, []);
 
-  // Esc cancels the active session's pending permission or question prompt
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Escape") return;
-      if (ask) replyAsk(ask, -1, "", "");
-      else if (permission) replyPermission(permission, false);
-      else if (streaming) cancelRun();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [ask, permission, streaming, cancelRun, replyAsk, replyPermission]);
+    let alive = true;
+    const url = window.electronAPI?.getEngineUrl?.() ?? Promise.resolve(ENGINE_URL_FALLBACK);
+    void url.then((value) => { if (alive) setEngineUrl(value || ENGINE_URL_FALLBACK); })
+      .catch((error) => { if (alive) reportError(String(error)); });
+    return () => { alive = false; };
+  }, [reportError]);
 
-  // Auto-scroll transcript on new blocks / streaming state
   useEffect(() => {
-    const el = transcriptRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [blocks, streaming]);
+    if (!state.workspace || state.status !== "connected") {
+      setWorktrees([]);
+      return;
+    }
+    let alive = true;
+    void run((client) => client.listWorktrees()).then((items) => {
+      if (alive && items) setWorktrees(items);
+    });
+    return () => { alive = false; };
+  }, [state.workspace, state.status, run]);
 
-  const folders: FolderWorkspace[] = useMemo(
-    () =>
-      knownFolders.map((kf) => ({
-        id: kf.id,
-        name: kf.name,
-        path: kf.path,
-        sessions:
-          kf.path === workspace
-            ? sessions.map((s) => ({
-                id: s.id,
-                title: cleanTitle(s.title),
-                updatedTime: formatTimeAgo(s.updatedAt, s.id),
-                count: s.count,
-                branch: s.branch,
-              }))
-            : [],
-      })),
-    [knownFolders, workspace, sessions]
-  );
+  const handleNewChat = useCallback((path?: string) => run(async (client) => {
+    if (path && path !== state.workspace) await client.setWorkspace(path);
+    return client.createSession();
+  }), [run, state.workspace]);
 
-  const activeSession = useMemo(
-    () => sessions.find((s) => s.id === activeId) ?? null,
-    [sessions, activeId]
-  );
+  const handleSelectSession = useCallback((path: string, id: string) => run(async (client) => {
+    if (window.matchMedia("(max-width: 720px)").matches) setSidebarOpen(false);
+    if (path !== state.workspace) await client.setWorkspace(path);
+    return client.selectSession(id);
+  }), [run, state.workspace]);
 
-  const switchWorkspace = useCallback(async (folderId?: string) => {
-    if (!folderId) return true;
-    const folder = knownFolders.find(f => f.id === folderId);
-    if (!folder?.path) return false;
-    const confirmed = await setWorkspace(folder.path);
-    if (!confirmed) return false;
-    setProjectName(folder.name); return true;
-  }, [knownFolders, setWorkspace]);
-
-  const handleSelectSession = useCallback(async (folderId:string,sessionId:string) => {
-    if (await switchWorkspace(folderId)) await selectSession(sessionId);
-  }, [switchWorkspace,selectSession]);
-  const handleNewChat = useCallback(async (folderId?:string) => {
-    if (await switchWorkspace(folderId)) await createSession();
-  }, [switchWorkspace,createSession]);
   const handleOpenFolder = useCallback(async () => {
-    if (isDesktop === false) { pushLocal("Open folder is available in the desktop app."); return; }
-    const picked = await window.electronAPI?.openFolderDialog?.(); if (!picked) return;
-    if (!await setWorkspace(picked)) return;
-    const name = picked.split(/[/\\]/).filter(Boolean).pop() ?? picked;
-    setProjectName(name);
-    setKnownFolders(prev => prev.some(f=>f.path===picked) ? prev : [...prev,{id:picked,name,path:picked}]);
-    await createSession(name+" session");
-  }, [isDesktop,pushLocal,setWorkspace,setKnownFolders,createSession]);
-  useEffect(()=>{
-    if(!workspace)return;
-    const name=workspace.split(/[/\\]/).filter(Boolean).pop()??workspace;
-    setProjectName(name);
-    setKnownFolders(prev=>prev.some(f=>f.path===workspace)?prev:[...prev.filter(f=>f.path),{id:workspace,name,path:workspace}]);
-  },[workspace,setKnownFolders]);
-  const handleSendPrompt = useCallback((raw:string) => startChat(raw,model), [startChat,model]);
-  const handleDeleteSession = useCallback((id:string) => { void deleteSession(id); }, [deleteSession]);
-  const handleRenameSession = useCallback((id:string, title:string) => { const trimmed=title.trim(); if(trimmed)void renameSession(id,trimmed); }, [renameSession]);
-  const handleAnswerAsk = useCallback(
-    (selected: number, label: string, input: string) => {
-      if (!ask) return;
-      const answer = selected === -1 ? input.trim() : label;
-      if (!answer) return;
-      replyAsk(ask, selected, answer, answer);
-    },
-    [ask, replyAsk]
-  );
+    if (!window.electronAPI?.openFolderDialog) {
+      reportError("Open folder is available in the desktop app.");
+      return;
+    }
+    try {
+      const picked = await window.electronAPI.openFolderDialog();
+      if (picked) await run(async (client) => {
+        const confirmed = await client.setWorkspace(picked);
+        return client.createSession(workspaceName(confirmed) + " session");
+      });
+    } catch (error) { reportError(String(error)); }
+  }, [run, reportError]);
 
-  const handlePermissionDecision = useCallback(
-    (approved: boolean) => {
-      if (!permission) return;
-      replyPermission(permission, approved);
-    },
-    [permission, replyPermission]
-  );
+  const handleSendPrompt = useCallback(async (raw: string) => {
+    const text = raw.trim();
+    return !!text && !!(await run((client) => client.startChat(text, model, state.activeId, conversation.compactNext, reasoningEffort)));
+  }, [run, model, state.activeId, conversation.compactNext, reasoningEffort]);
 
-  const handleSaveAllowAll = useCallback((next: boolean) => {
-    void setSettings({ allowAll: next, permission: next ? "allow" : "ask" });
-  }, [setSettings]);
+  const handleCompact = useCallback(async () => {
+    const { activeId } = state;
+    const { runId } = conversation;
+    if (streaming && activeId && runId) {
+      await run((client) => client.compactRun(activeId, runId));
+    } else {
+      setCompactNext(!conversation.compactNext);
+    }
+  }, [run, streaming, state.activeId, conversation.runId, conversation.compactNext, setCompactNext]);
 
-  // Global keyboard shortcuts (below the handlers they call — no stale closures)
+  const cancelRun = useCallback(() => {
+    const { activeId } = state;
+    const { runId } = conversation;
+    if (activeId && runId) void run((client) => client.cancelRun(activeId, runId));
+  }, [run, state.activeId, conversation.runId]);
+
+  const handleDeleteSession = useCallback((id: string) => { void run((client) => client.deleteSession(id)); }, [run]);
+  const handleRenameSession = useCallback((id: string, title: string) => {
+    if (title.trim()) void run((client) => client.renameSession(id, title.trim()));
+  }, [run]);
+
+  const handleCreateWorktree = useCallback(async (branch: string) => {
+    const created = await run((client) => client.createWorktree(branch));
+    if (!created) return null;
+    setWorktrees((items) => items.some((item) => item.path === created.path) ? items : [...items, created]);
+    return created;
+  }, [run]);
+
+  const handleSelectWorktree = useCallback((path: string) => {
+    if (path !== state.workspace) void run((client) => client.setWorkspace(path));
+  }, [run, state.workspace]);
+
+  const handleSelectPermission = useCallback(async (mode: PermissionMode) => {
+    await run((client) => client.setSettings({ permission: mode }));
+  }, [run]);
+
+  const handleAnswerAsk = useCallback((selected: number, label: string, input: string) => {
+    if (!ask) return;
+    const answer = (selected === -1 ? input : label).trim();
+    if (selected !== -1 && !answer) return;
+    const { sessionId, runId, interactionId } = ask;
+    void run((client) => client.replyAsk({ sessionId, runId, interactionId, selected, answer, label: answer }));
+  }, [run, ask]);
+
+  const handlePermissionDecision = useCallback((approved: boolean) => {
+    if (!permission) return;
+    const { sessionId, runId, interactionId } = permission;
+    void run((client) => client.replyPermission({ sessionId, runId, interactionId, approved }));
+  }, [run, permission]);
+
+  async function saveSettings(values: SettingsValues) {
+    if (values.url === engineUrl && state.status === "connected" && values.permission !== state.permissionMode) {
+      await run((client) => client.setSettings({ permission: values.permission }));
+    }
+    if (values.token) {
+      try { sessionStorage.setItem("engine-token:" + values.url, values.token); }
+      catch (error) { reportError(String(error)); return; }
+    }
+    setModel(values.model);
+    setEngineUrl(values.url);
+    if (values.url === engineUrl && values.token) reconnect();
+    setSettingsOpen(false);
+  }
+
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
+      if (event.defaultPrevented) return;
+      if (settingsOpen) {
+        if (event.key === "Escape") { event.preventDefault(); setSettingsOpen(false); return; }
+        if (!(event.ctrlKey || event.metaKey)) return;
+        if (event.key.toLowerCase() === "b") { event.preventDefault(); toggleSettingsNav(); }
+        if (event.key === ",") { event.preventDefault(); setSettingsOpen(false); }
+        return;
+      }
+      if (event.key === "Escape") {
+        if (sidebarOpen && window.matchMedia("(max-width: 720px)").matches) { setSidebarOpen(false); return; }
+        if (ask) handleAnswerAsk(-1, "", "");
+        else if (permission) handlePermissionDecision(false);
+        else if (streaming) cancelRun();
+      }
       if (!(event.ctrlKey || event.metaKey)) return;
-      const key = event.key.toLowerCase();
-      if (key === "b") {
-        event.preventDefault();
-        setSidebarOpen((v) => !v);
-      } else if (key === "n") {
-        event.preventDefault();
-        handleNewChat();
-      } else if (key === "o") {
-        event.preventDefault();
-        void handleOpenFolder();
-      } else if (event.key === ",") {
-        event.preventDefault();
-        setSettingsOpen(true);
+      switch (event.key.toLowerCase()) {
+        case "b": event.preventDefault(); toggleSidebar(); break;
+        case "n": event.preventDefault(); void handleNewChat(); break;
+        case "o": event.preventDefault(); void handleOpenFolder(); break;
+        case ",": event.preventDefault(); openSettings(); break;
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [handleNewChat, handleOpenFolder]);
+  }, [settingsOpen, sidebarOpen, ask, permission, streaming, cancelRun, handleAnswerAsk, handlePermissionDecision, handleNewChat, handleOpenFolder, toggleSidebar, toggleSettingsNav, openSettings]);
 
-  const isLanding = blocks.filter((b) => b.role !== "system").length === 0;
-
+  const isLanding = blocks.length === 0;
   const composer = (mode: "centered" | "docked") => (
-    <Composer
-      mode={mode}
-      selectedModel={model}
-      onSelectModel={setModel}
-      onSend={handleSendPrompt}
-      onStop={cancelRun}
-      isStreaming={streaming}
-      disabled={wsState !== "connected"}
-    />
+    <Composer mode={mode} selectedModel={model} onSelectModel={setModel} reasoningEffort={reasoningEffort} onSelectReasoningEffort={setReasoningEffort}
+      permissionMode={state.permissionMode} onSelectPermission={handleSelectPermission}
+      onSend={handleSendPrompt} onStop={cancelRun} isStreaming={streaming}
+      disabled={state.status !== "connected"}
+      contextControl={<ContextControl key={state.workspace + ":" + state.activeId}
+        context={conversation.context} running={streaming} queued={conversation.compactQueued}
+        compactNext={conversation.compactNext} hasHistory={blocks.length > 0}
+        connected={state.status === "connected"} onCompact={handleCompact} />} />
   );
 
   return (
     <ErrorBoundary>
-      <div className="flex flex-col h-screen w-screen bg-[var(--bg-sidebar)] text-[var(--text-main)] overflow-hidden font-sans select-none">
-        {error && <div role="alert" className="px-4 py-2 text-sm text-red-400">{error}</div>}
+      <div className="studio-app animate-appear">
         <MenuBar
-          onNewChat={() => handleNewChat()}
-          onOpenFolder={() => void handleOpenFolder()}
-          onOpenSettings={() => setSettingsOpen(true)}
-          onToggleSidebar={() => setSidebarOpen((v) => !v)}
+          onNewChat={handleNewChat}
+          onOpenFolder={handleOpenFolder}
+          onOpenSettings={openSettings}
+          onToggleSidebar={settingsOpen ? toggleSettingsNav : toggleSidebar}
           currentTheme={theme}
           sessionTokens={usage.total}
           onSaveTheme={setTheme}
-          engineState={wsState}
-          projectName={projectName}
+          engineState={state.status}
+          projectName={workspaceName(state.workspace)}
           sessionTitle={activeSession?.title ?? null}
         />
-        <div className="flex flex-1 min-h-0 overflow-hidden bg-[var(--bg-sidebar)]">
+        <div className="studio-workspace">
+          {settingsOpen ? <SettingsPage
+            navOpen={settingsNavOpen}
+            onToggleNav={toggleSettingsNav}
+            onClose={() => setSettingsOpen(false)}
+            engineUrl={engineUrl}
+            engineState={state.status}
+            defaultModel={model}
+            currentTheme={theme}
+            onSaveTheme={setTheme}
+            accentColor={accentColor}
+            onSaveAccent={setAccentColor}
+            surfaceColor={surfaceColor}
+            onSaveSurface={setSurfaceColor}
+            transcriptSize={transcriptSize}
+            onSaveTranscriptSize={setTranscriptSize}
+            permissionMode={state.permissionMode}
+            onSave={saveSettings}
+          /> : <>
+          {sidebarOpen && <button type="button" className="sidebar-backdrop" aria-label="Close sidebar" onClick={toggleSidebar} />}
           <Sidebar
             isOpen={sidebarOpen}
-            folders={folders}
-            activeSessionId={activeId}
+            connected={state.status === "connected"}
+            onToggleSidebar={toggleSidebar}
+            workspaces={workspaces}
+            workspace={state.workspace}
+            worktrees={worktrees}
+            sessions={state.sessions}
+            activeSessionId={state.activeId}
             onSelectSession={handleSelectSession}
             onNewSession={handleNewChat}
             onDeleteSession={handleDeleteSession}
             onRenameSession={handleRenameSession}
-            onOpenFolder={() => void handleOpenFolder()}
-            onOpenSettings={() => setSettingsOpen(true)}
+            onCreateWorktree={handleCreateWorktree}
+            onSelectWorktree={handleSelectWorktree}
+            onOpenFolder={handleOpenFolder}
+            onOpenSettings={openSettings}
           />
 
-          <main className="studio-canvas flex-1 flex flex-col min-w-0 overflow-hidden relative">
-            {!sidebarOpen && (
-              <button
-                className="studio-icon absolute top-2.5 left-3 z-30 bg-[var(--bg-card)] border-subtle shadow-xs"
-                aria-label="Toggle sidebar"
-                title="Toggle sidebar (Ctrl+B)"
-                onClick={() => setSidebarOpen(true)}
-              >
-                <PanelLeft size={14} />
-              </button>
-            )}
+          <main className="studio-canvas">
+            {!sidebarOpen && <button type="button" className="sidebar-reopen" onClick={toggleSidebar}
+              aria-label="Open sidebar" title="Open sidebar (Ctrl+B)"><PanelLeft size={18} strokeWidth={1.6} aria-hidden="true" /></button>}
+            {state.error && <div role="alert" className="workspace-error"><span>{state.error}</span><button type="button" onClick={openSettings}>Preferences <ArrowUpRight size={13} /></button></div>}
             {isLanding ? (
+              <div className="landing-scroll">
               <div className="studio-landing animate-appear">
                 <div className="landing-heading">
-                  <h1>What would you like to build?</h1>
-                  <p>Pair with Excelsior to inspect files, edit code, and run tasks directly.</p>
+                  <h1>What are we building?</h1>
                 </div>
                 <div className="w-full">
                   {composer("centered")}
-                  {wsState !== "connected" && (
-                    <div className="flex justify-center">
-                      <button className="connection-notice" onClick={() => setSettingsOpen(true)}>
-                        <span className="status-dot" /> Connect engine to run tasks
-                      </button>
-                    </div>
-                  )}
                 </div>
-                <div className="starter-section">
-                  <div className="starter-grid">
-                    {SUGGESTIONS.map((chip, i) => (
-                      <button
-                        key={chip.label}
-                        type="button"
-                        onClick={() => handleSendPrompt(chip.prompt)}
-                        disabled={wsState !== "connected"}
-                        className="starter-card animate-appear"
-                        style={{ animationDelay: `${i * 35}ms` }}
-                      >
-                        <strong>{chip.label}</strong>
-                        <p>{chip.desc}</p>
-                      </button>
-                    ))}
-                  </div>
-                </div>
+                {state.workspace && state.sessions.some((session) => session.count > 0) && <section className="recent-sessions" aria-label="Recent sessions">
+                  <div className="recent-heading"><h2>Recent sessions</h2><button type="button" onClick={() => setSidebarOpen(true)}>View all <ArrowRight size={12} /></button></div>
+                  {state.sessions.filter((session) => session.count > 0).slice(0, 3).map((session) => <button type="button" className="recent-session" key={session.id} onClick={() => handleSelectSession(state.workspace!, session.id)}>
+                    <MessageSquare size={15} strokeWidth={1.5} aria-hidden="true" /><span>{session.title}</span><time>{formatTimeAgo(session.updatedAt, session.id)}</time><ArrowUpRight size={14} aria-hidden="true" />
+                  </button>)}
+                </section>}
+              </div>
               </div>
             ) : (
-              <div key={activeId ?? "session"} className="flex-1 flex flex-col h-full min-h-0 animate-appear">
+              <div key={state.activeId ?? "session"} className="flex-1 flex flex-col h-full min-h-0 animate-appear">
                 <Transcript
-                  ref={transcriptRef}
                   blocks={blocks}
                   streaming={streaming}
                   permission={permission}
                   onPermissionDecision={handlePermissionDecision}
-                  onAllowAll={() => { handleSaveAllowAll(true); handlePermissionDecision(true); }}
+                  onAllowAlways={() => { void run((client) => client.setSettings({ permission: "allow" })); handlePermissionDecision(true); }}
                 />
-                <div className="shrink-0 bg-gradient-to-t from-[var(--bg-canvas)] via-[var(--bg-canvas)] to-transparent pt-2">
-                  {ask ? <AskDialog ask={ask} onAnswer={handleAnswerAsk} /> : composer("docked")}
+                <div className="composer-dock">
+                  {ask ? <AskDialog key={ask.interactionId} ask={ask} onAnswer={handleAnswerAsk} /> : composer("docked")}
                 </div>
               </div>
             )}
           </main>
+          </>}
         </div>
-
-        <SettingsModal
-          isOpen={settingsOpen}
-          onClose={closeSettings}
-          engineUrl={engineUrl}
-          onSaveEngineUrl={setEngineUrl}
-          engineState={wsState}
-          defaultModel={model}
-          onSaveDefaultModel={setModel}
-          currentTheme={theme}
-          onSaveTheme={setTheme}
-          allowAll={allowAll}
-          onSaveAllowAll={handleSaveAllowAll}
-        />
       </div>
     </ErrorBoundary>
   );

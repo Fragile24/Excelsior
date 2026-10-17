@@ -1,256 +1,182 @@
 import React, { useCallback, useState } from "react";
-import { ChevronRight, GitBranch, Plus, Settings2 } from "lucide-react";
-import { PencilIcon, TrashIcon } from "./Icons";
-import { cleanTitle } from "../lib/format";
-
-export type SessionItem = {
-  id: string;
-  title: string;
-  updatedTime?: string;
-  count?: number;
-  branch?: string;
-  added?: number;
-  deleted?: number;
-};
-
-export type FolderWorkspace = {
-  id: string;
-  name: string;
-  path?: string;
-  sessions: SessionItem[];
-};
+import { ChevronRight, Folder, FolderOpen, FolderPlus, GitBranch, MessageSquare, PanelLeftClose, Plus, Search, Settings2, X } from "./phosphor-icons";
+import { BrandMark, PencilIcon, TrashIcon } from "./Icons";
+import { cleanTitle, formatTimeAgo, workspaceName } from "../lib/format";
+import type { SessionInfo, WorktreeInfo } from "../lib/protocol";
 
 type SidebarProps = {
   isOpen: boolean;
-  folders: FolderWorkspace[];
+  connected: boolean;
+  workspaces: string[];
+  workspace: string | null;
+  worktrees: WorktreeInfo[];
+  sessions: SessionInfo[];
   activeSessionId: string | null;
   onSelectSession: (folderId: string, sessionId: string) => void;
-  onNewSession?: (folderId: string) => void;
+  onNewSession?: (folderId?: string) => void;
   onDeleteSession?: (id: string) => void;
   onRenameSession?: (id: string, title: string) => void;
+  onCreateWorktree?: (branch: string) => Promise<WorktreeInfo | null>;
+  onSelectWorktree?: (path: string) => void;
   onOpenFolder: () => void;
   onOpenSettings: () => void;
+  onToggleSidebar: () => void;
 };
 
-const SessionRow = React.memo(function SessionRow({
-  folderId,
-  session,
-  isActive,
-  onSelectSession,
-  onDeleteSession,
-  onRenameSession,
-}: {
+const SessionRow = React.memo(function SessionRow({ folderId, session, isActive, onSelectSession, onDeleteSession, onRenameSession }: {
   folderId: string;
-  session: SessionItem;
+  session: SessionInfo;
   isActive: boolean;
   onSelectSession: SidebarProps["onSelectSession"];
   onDeleteSession?: SidebarProps["onDeleteSession"];
   onRenameSession?: SidebarProps["onRenameSession"];
 }) {
-  const handleSelect = useCallback(() => onSelectSession(folderId, session.id), [folderId, onSelectSession, session.id]);
   const [editing, setEditing] = useState(false);
+  const editingRef = React.useRef(false);
   const [draft, setDraft] = useState(session.title);
-
-  const startEdit = useCallback(() => {
-    setDraft(session.title);
-    setEditing(true);
-  }, [session.title]);
-
-  const commit = useCallback(() => {
-    const trimmed = draft.trim();
+  const startEdit = () => { setDraft(session.title); editingRef.current = true; setEditing(true); };
+  const commit = () => {
+    if (!editingRef.current) return;
+    editingRef.current = false;
     setEditing(false);
-    if (trimmed && trimmed !== session.title) {
-      onRenameSession?.(session.id, trimmed);
-    }
-  }, [draft, session.id, session.title, onRenameSession]);
-
-  const cancel = useCallback(() => {
-    setEditing(false);
-  }, []);
+    if (draft.trim() && draft.trim() !== session.title) onRenameSession?.(session.id, draft.trim());
+  };
 
   return (
-    <div
-      role="button"
-      tabIndex={0}
-      onClick={handleSelect}
-      onDoubleClick={() => {
-        if (onRenameSession) {
-          startEdit();
-        }
-      }}
-      onKeyDown={(e) => {
-        if (editing) {
-          return;
-        }
-        if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) {
-          e.preventDefault();
-          handleSelect();
-        }
-      }}
-      className={`session-row w-full relative flex items-center justify-between px-2 py-1.5 rounded-md select-none animate-appear ${
-        isActive
-          ? "bg-[var(--bg-card)] text-[var(--text-main)] font-medium"
-          : "text-[var(--text-muted)]"
-      }`}
-    >
-      <div className="min-w-0 flex-1 pl-1">
-        <div className="flex items-center gap-1.5 text-[12.5px] truncate">
-          {editing ? (
-            <input
-              autoFocus
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              onBlur={commit}
-              onClick={(e) => e.stopPropagation()}
-              onDoubleClick={(e) => e.stopPropagation()}
-              onKeyDown={(e) => {
-                e.stopPropagation();
-                if (e.key === "Enter") {
-                  e.preventDefault();
-                  commit();
-                } else if (e.key === "Escape") {
-                  e.preventDefault();
-                  cancel();
-                }
-              }}
-              aria-label={`Rename ${session.title}`}
-              className="w-full bg-transparent outline-none border-b border-[var(--text-dim)] text-[var(--text-main)]"
-            />
-          ) : (
-            <span className="truncate">{cleanTitle(session.title)}</span>
-          )}
-        </div>
-        <div className="flex items-center gap-2 text-[10.5px] text-[var(--text-dim)] mt-0.5">
-          {session.updatedTime && <span>{session.updatedTime}</span>}
-          {!!session.added && <span className="text-emerald-500">+{session.added}</span>}
-          {!!session.deleted && <span className="text-rose-500">-{session.deleted}</span>}
-          {session.branch && (
-            <span className="flex items-center gap-0.5 min-w-0 truncate">
-              <GitBranch className="w-2.5 h-2.5 shrink-0" aria-hidden />
-              <span className="truncate">{session.branch}</span>
+    <div className={`session-row ${isActive ? "is-active" : ""}`}>
+      {editing ? (
+        <input
+          autoFocus
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+          onBlur={commit}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") { event.preventDefault(); commit(); }
+            if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); editingRef.current = false; setEditing(false); }
+          }}
+          aria-label={`Rename ${session.title}`}
+          className="session-rename"
+        />
+      ) : (
+        <button type="button" className="session-select" onClick={() => onSelectSession(folderId, session.id)}
+          onDoubleClick={onRenameSession ? startEdit : undefined} aria-current={isActive ? "page" : undefined}>
+          <MessageSquare size={17} strokeWidth={1.5} aria-hidden="true" />
+          <span className="session-info">
+            <span className="session-title">{cleanTitle(session.title)}</span>
+            <span className="session-meta">
+              <span>{formatTimeAgo(session.updatedAt, session.id)}</span>
+              {!!session.added && <span className="text-emerald-500">+{session.added}</span>}
+              {!!session.deleted && <span className="text-rose-500">−{session.deleted}</span>}
+              {session.branch && <span className="session-branch"><GitBranch size={12} aria-hidden="true" />{session.branch}</span>}
             </span>
-          )}
-        </div>
-      </div>
-
-      <div className="session-actions flex items-center gap-0.5 text-[10px] shrink-0 ml-1">
-        {onRenameSession && (
-          <button
-            type="button"
-            onClick={(e) => { e.stopPropagation(); startEdit(); }}
-            aria-label={`Rename ${session.title}`}
-            className="p-1 rounded hover:bg-[var(--bg-card-hover)] text-[var(--text-dim)] hover:text-[var(--text-main)] transition-colors"
-          >
-            <PencilIcon className="w-3 h-3" />
-          </button>
-        )}
-        {onDeleteSession && (
-          <button
-            type="button"
-            onClick={(e) => { e.stopPropagation(); onDeleteSession(session.id); }}
-            aria-label={`Delete ${session.title}`}
-            className="p-1 rounded hover:bg-rose-500/15 text-[var(--text-dim)] hover:text-rose-400 transition-colors"
-          >
-            <TrashIcon className="w-3 h-3" />
-          </button>
-        )}
-      </div>
+          </span>
+        </button>
+      )}
+      {!editing && <div className="session-actions">
+        {onRenameSession && <button type="button" onClick={startEdit} aria-label={`Rename ${session.title}`} title="Rename session"><PencilIcon className="w-3.5 h-3.5" /></button>}
+        {onDeleteSession && <button type="button" onClick={() => onDeleteSession(session.id)} aria-label={`Delete ${session.title}`} title="Delete session"><TrashIcon className="w-3.5 h-3.5" /></button>}
+      </div>}
     </div>
   );
 });
 
-function Sidebar({
-  isOpen,
-  folders,
-  activeSessionId,
-  onSelectSession,
-  onNewSession,
-  onDeleteSession,
-  onRenameSession,
-  onOpenSettings,
-}: SidebarProps) {
+function Sidebar({ isOpen, connected, workspaces, workspace, worktrees, sessions, activeSessionId, onSelectSession, onNewSession, onDeleteSession, onRenameSession, onCreateWorktree, onSelectWorktree, onOpenFolder, onOpenSettings, onToggleSidebar }: SidebarProps) {
   const [collapsedFolders, setCollapsedFolders] = useState<Record<string, boolean>>({});
-
-  const toggleFolder = useCallback((folderId: string) => {
-    setCollapsedFolders((prev) => ({ ...prev, [folderId]: !prev[folderId] }));
-  }, []);
-
+  const [query, setQuery] = useState("");
+  const [creatingWorktree, setCreatingWorktree] = useState(false);
+  const [worktreeBranch, setWorktreeBranch] = useState("");
+  const [savingWorktree, setSavingWorktree] = useState(false);
+  const [worktreeError, setWorktreeError] = useState("");
+  const toggleFolder = useCallback((path: string) => setCollapsedFolders((previous) => ({ ...previous, [path]: !previous[path] })), []);
+  const createWorktree = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const branch = worktreeBranch.trim();
+    if (!branch || savingWorktree || !connected || !onCreateWorktree) return;
+    setSavingWorktree(true);
+    setWorktreeError("");
+    try {
+      const created = await onCreateWorktree(branch);
+      if (!created) { setWorktreeError("Could not create branch"); return; }
+      setWorktreeBranch("");
+      setCreatingWorktree(false);
+    } finally {
+      setSavingWorktree(false);
+    }
+  };
   if (!isOpen) return null;
 
   return (
-    <aside className="studio-sidebar flex flex-col h-full shrink-0 z-20 select-none pt-2">
-      <div className="flex-1 overflow-y-auto px-1 space-y-1">
-        {folders.map((folder) => {
-          const isCollapsed = !!collapsedFolders[folder.id];
+    <aside id="workspace-sidebar" className="studio-sidebar animate-appear" aria-label="Workspace navigation">
+      <div className="sidebar-brand">
+        <span className="brand-wordmark"><BrandMark />Excelsior</span>
+        <button type="button" className="studio-icon" onClick={onToggleSidebar} aria-label="Collapse sidebar" title="Collapse sidebar (Ctrl+B)"><PanelLeftClose size={19} strokeWidth={1.5} /></button>
+      </div>
+      <div className="sidebar-primary">
+        <button type="button" className="new-session-button" onClick={() => onNewSession?.()} disabled={!connected} title={connected ? "New session (Ctrl+N)" : "Connect your engine to start a session"}>
+          <Plus size={19} strokeWidth={1.6} /><span>New session</span><kbd>Ctrl N</kbd>
+        </button>
+        <div className="session-search">
+          <Search size={17} strokeWidth={1.6} aria-hidden="true" />
+          <input type="search" placeholder="Search sessions" aria-label="Find a session" value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => {
+            if (event.key === "Escape" && query) { event.preventDefault(); event.stopPropagation(); setQuery(""); }
+          }} />
+          {query && <button type="button" onClick={() => setQuery("")} aria-label="Clear session search"><X size={15} /></button>}
+        </div>
+      </div>
+      <div className="sidebar-section-heading">
+        <span>Projects</span>
+        <button type="button" className="studio-icon" onClick={onOpenFolder} aria-label="Open folder" title="Open folder (Ctrl+O)"><FolderPlus size={18} strokeWidth={1.5} /></button>
+      </div>
+      <div className="sidebar-projects">
+        {workspaces.length === 0 && <div className="sidebar-empty">
+          <button type="button" onClick={onOpenFolder}><FolderOpen size={18} />Open folder</button>
+        </div>}
+        {workspaces.map((path) => {
+          const name = workspaceName(path);
+          const current = path === workspace;
+          const items = current ? sessions.filter((session) => session.title.toLowerCase().includes(query.toLowerCase())) : [];
+          const trackedWorktrees = current ? worktrees.filter((item) => !query || `${item.branch ?? ""} ${item.path}`.toLowerCase().includes(query.toLowerCase())) : [];
+          const collapsed = !!collapsedFolders[path] && !query;
           return (
-            <div key={folder.id} className="w-full space-y-0.5">
-              <div
-                role="button"
-                tabIndex={0}
-                aria-expanded={!isCollapsed}
-                onClick={() => toggleFolder(folder.id)}
-                onKeyDown={(e) => {
-                  if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) {
-                    e.preventDefault();
-                    toggleFolder(folder.id);
-                  }
-                }}
-                className="w-full flex items-center justify-between px-2 py-1.5 text-[13.5px] font-semibold text-[var(--text-main)] cursor-pointer rounded-md hover:bg-[var(--bg-card-hover)] transition-colors"
-              >
-                <span className="flex items-center gap-2 truncate">
-                  <ChevronRight className={`w-3.5 h-3.5 text-[var(--text-dim)] transition-transform duration-150 ${isCollapsed ? "" : "rotate-90"}`} />
-                  <span className="truncate tracking-tight">{folder.name}</span>
-                </span>
-                <span className="flex items-center gap-1.5">
-                  <span className="text-[11px] font-mono text-[var(--text-dim)] font-normal">
-                    {folder.sessions.length}
-                  </span>
-                  {onNewSession && (
-                    <button
-                      type="button"
-                      title="New session in this folder"
-                      aria-label={`New session in ${folder.name}`}
-                      onClick={(e) => { e.stopPropagation(); onNewSession(folder.id); }}
-                      className="p-1 rounded text-[var(--text-dim)] hover:text-[var(--text-main)] hover:bg-[var(--bg-card-hover)] transition-colors cursor-pointer"
-                    >
-                      <Plus className="w-3.5 h-3.5" />
-                    </button>
-                  )}
-                </span>
+            <div key={path} className="project-group">
+              <div className="project-heading">
+                <button type="button" className="project-toggle" aria-expanded={!collapsed} onClick={() => toggleFolder(path)} title={path}>
+                  <ChevronRight size={14} className={collapsed ? "" : "rotate-90"} aria-hidden="true" />
+                  <Folder size={18} strokeWidth={1.5} aria-hidden="true" /><span>{name}</span>
+                </button>
+                {onNewSession && <button type="button" className="studio-icon" disabled={!connected} title={`New session in ${name}`} aria-label={`New session in ${name}`} onClick={() => onNewSession(path)}><Plus size={18} /></button>}
               </div>
-
-              {!isCollapsed && (
-                <div className="w-full space-y-0.5 animate-appear">
-                  {folder.sessions.length === 0 ? (
-                    <div className="text-[11px] text-[var(--text-dim)] py-2 text-center">
-                      No sessions
-                    </div>
-                  ) : (
-                    folder.sessions.map((session) => (
-                      <SessionRow
-                        key={session.id}
-                        folderId={folder.id}
-                        session={session}
-                        isActive={activeSessionId === session.id}
-                        onSelectSession={onSelectSession}
-                        onDeleteSession={onDeleteSession}
-                        onRenameSession={onRenameSession}
-                      />
-                    ))
-                  )}
-                </div>
-              )}
+              {!collapsed && <div className="project-sessions">
+                {items.length === 0 ? <p className="sessions-empty">{query && current ? "No matching sessions" : current ? "No sessions yet" : "Start a session in this project"}</p>
+                  : items.map((session) => <SessionRow key={session.id} folderId={path} session={session} isActive={current && activeSessionId === session.id}
+                    onSelectSession={onSelectSession} onDeleteSession={onDeleteSession} onRenameSession={onRenameSession} />)}
+                {current && worktrees.length > 0 && <section className="worktree-section" aria-label="Git worktrees">
+                  <div className="worktree-heading"><span>Worktrees</span>
+                    {onCreateWorktree && <button type="button" className="studio-icon" disabled={!connected || savingWorktree} onClick={() => { setCreatingWorktree((value) => !value); setWorktreeError(""); }} aria-label="Create worktree" title="Create worktree"><Plus size={15} /></button>}
+                  </div>
+                  {trackedWorktrees.map((item) => <button type="button" className={`worktree-row ${item.current ? "is-current" : ""}`} key={item.path} title={item.path} disabled={!connected || item.current} onClick={() => onSelectWorktree?.(item.path)} aria-current={item.current ? "page" : undefined}>
+                    <GitBranch size={14} aria-hidden="true" />
+                    <span>{item.branch || `Detached at ${item.head?.slice(0, 7) ?? "HEAD"}`}</span>
+                    {item.current && <small>Current</small>}
+                    {!item.current && item.main && <small>Main</small>}
+                  </button>)}
+                  {trackedWorktrees.length === 0 && query && <p className="worktree-empty">No matching worktrees</p>}
+                  {creatingWorktree && <form className="worktree-create" onSubmit={(event) => void createWorktree(event)}>
+                    <span className="worktree-origin">From current HEAD</span>
+                    <input autoFocus value={worktreeBranch} onChange={(event) => setWorktreeBranch(event.target.value)} placeholder="New branch" aria-label="New worktree branch" onKeyDown={(event) => { if (event.key === "Escape") { setCreatingWorktree(false); setWorktreeBranch(""); } }} />
+                    <button type="submit" disabled={!worktreeBranch.trim() || !connected || savingWorktree}>{savingWorktree ? "Creating…" : "Create"}</button>
+                    {worktreeError && <span role="status">{worktreeError}</span>}
+                  </form>}
+                </section>}
+              </div>}
             </div>
           );
         })}
       </div>
-
       <div className="sidebar-bottom">
-        <button onClick={onOpenSettings}>
-          <Settings2 size={14} />
-          <span>Preferences</span>
-          <kbd>Ctrl ,</kbd>
-        </button>
+        <button type="button" onClick={onOpenFolder}><FolderOpen size={18} strokeWidth={1.5} /><span>Open project</span><kbd>Ctrl O</kbd></button>
+        <button type="button" onClick={onOpenSettings}><Settings2 size={18} strokeWidth={1.5} /><span>Preferences</span><kbd>Ctrl ,</kbd></button>
+        <div className="sidebar-local"><span className={`status-dot ${connected ? "online" : ""}`} />{connected ? "Engine connected" : "Engine disconnected"}</div>
       </div>
     </aside>
   );

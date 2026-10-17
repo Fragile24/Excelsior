@@ -28,7 +28,7 @@ type Hub struct {
 	SessionStore   session.Store                                       // Injectable store for tests and embedded use.
 	Token          string
 	AllowedOrigins []string
-	// PermissionOverride is a runtime-only CLI override (--yolo/--permission).
+	// PermissionOverride is a runtime-only CLI override.
 	// Persisted permission lives in workspace settings (env-seeded).
 	PermissionOverride config.PermissionMode
 

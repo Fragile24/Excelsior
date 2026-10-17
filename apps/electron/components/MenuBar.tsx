@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { WindowCloseIcon, WindowMaximizeIcon, WindowMinimizeIcon } from "./Icons";
-import { AVAILABLE_THEMES } from "../contexts/ThemeContext";
+import { AVAILABLE_THEMES } from "../lib/constants";
 
 type MenuId = "file" | "view" | "window" | null;
 
@@ -28,13 +28,12 @@ type MenuItemProps = {
   danger?: boolean;
 };
 
-const THEMES = AVAILABLE_THEMES.map((t) => t.id);
-
 const MenuItem = React.memo(function MenuItem({ onClick, children, kbd, danger }: MenuItemProps) {
   return (
     <button
       type="button"
-      onClick={onClick}
+      role="menuitem"
+      onClick={() => onClick()}
       className={`w-full text-left px-3 py-1.5 rounded-md hover:bg-[var(--bg-card-hover)] cursor-pointer flex justify-between items-center transition-colors ${danger ? "text-rose-400 hover:text-rose-300 hover:bg-rose-500/10" : "text-[var(--text-main)]"}`}
     >
       <span className="text-[12px] font-medium">{children}</span>
@@ -56,9 +55,11 @@ function MenuBar({
   sessionTitle,
 }: MenuBarProps) {
   const [openMenu, setOpenMenu] = useState<MenuId>(null);
+  const [isDesktop, setIsDesktop] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
+    setIsDesktop(!!window.electronAPI);
     const handler = (event: MouseEvent) => {
       if (rootRef.current && !rootRef.current.contains(event.target as Node)) setOpenMenu(null);
     };
@@ -79,15 +80,24 @@ function MenuBar({
   return (
     <header
       ref={rootRef}
-      className="desktop-menubar h-9 flex items-center justify-between bg-[var(--bg-sidebar)] text-[var(--text-muted)] text-[12px] shrink-0 z-40 select-none"
+      className={`desktop-menubar ${isDesktop ? "is-desktop" : ""} flex items-center justify-between text-[var(--text-muted)] text-[12px] shrink-0 z-40 select-none`}
       style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
+      onKeyDown={(event) => {
+        if (event.key === "Escape" && openMenu) {
+          event.preventDefault();
+          event.stopPropagation();
+          setOpenMenu(null);
+          rootRef.current?.querySelector<HTMLButtonElement>(`button[data-menu="${openMenu}"]`)?.focus();
+        }
+      }}
     >
       <div className="flex items-center gap-2" style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}>
         <nav className="flex items-center gap-0.5" aria-label="Application menu">
-          {(["file", "view", "window"] as const).map((menu) => (
+          {(["file", "view", ...(isDesktop ? ["window" as const] : [])] as const).map((menu) => (
             <div key={menu} className="relative">
               <button
                 type="button"
+                data-menu={menu}
                 onClick={() => toggleMenu(menu)}
                 aria-expanded={openMenu === menu}
                 aria-haspopup="menu"
@@ -108,8 +118,8 @@ function MenuBar({
                       <MenuItem onClick={onOpenFolder} kbd="Ctrl+O">Open Folder…</MenuItem>
                       <div className="my-1.5 h-px bg-[var(--border-subtle)]" />
                       <MenuItem onClick={onOpenSettings} kbd="Ctrl+,">Settings…</MenuItem>
-                      <div className="my-1.5 h-px bg-[var(--border-subtle)]" />
-                      <MenuItem onClick={() => handleWindowControl("close")} danger kbd="Alt+F4">Exit</MenuItem>
+                      {isDesktop && <><div className="my-1.5 h-px bg-[var(--border-subtle)]" />
+                      <MenuItem onClick={() => handleWindowControl("close")} danger kbd="Alt+F4">Exit</MenuItem></>}
                     </>
                   )}
 
@@ -131,8 +141,8 @@ function MenuBar({
                           {currentTheme === t.id && <span className="text-[11px] font-bold">✓</span>}
                         </button>
                       ))}
-                      <div className="my-1.5 h-px bg-[var(--border-subtle)]" />
-                      <MenuItem onClick={() => window.electronAPI?.toggleDevTools?.()} kbd="F12">Developer Tools</MenuItem>
+                      {isDesktop && <><div className="my-1.5 h-px bg-[var(--border-subtle)]" />
+                      <MenuItem onClick={() => window.electronAPI?.toggleDevTools?.()} kbd="F12">Developer Tools</MenuItem></>}
                     </>
                   )}
 
@@ -151,7 +161,7 @@ function MenuBar({
         </nav>
       </div>
 
-      <span className="window-title">Excelsior <span>/</span> {projectName}</span>
+      <span className="window-title">Excelsior{sessionTitle && <><span>/</span>{sessionTitle}</>}</span>
       {/* Spacer */}
       <div className="flex-1" />
 
@@ -161,39 +171,46 @@ function MenuBar({
         {(sessionTokens ?? 0) > 0 && (
           <span
             className="font-mono text-[10.5px] px-2 py-0.5 rounded-full bg-[var(--bg-input)] border-subtle text-[var(--text-dim)]"
-            title="Tokens consumed in this session"
+            title="Tokens consumed in the last run, including context summaries"
+            data-ui-content
           >
-            {formatTokens(sessionTokens ?? 0)} tokens
+            {formatTokens(sessionTokens ?? 0)} consumed
           </span>
         )}
 
         {/* Window controls */}
-        <div className="flex items-center h-full ml-1">
+        {isDesktop && <div className="flex items-center h-full ml-1">
           <button
             type="button"
             aria-label="Minimize window"
+            aria-describedby="wc-min"
             onClick={() => handleWindowControl("minimize")}
             className="h-full px-3 text-[var(--text-dim)] hover:text-[var(--text-main)] hover:bg-[var(--bg-card-hover)] transition-colors"
           >
             <WindowMinimizeIcon className="w-3 h-3" />
           </button>
+          <span id="wc-min" role="tooltip" className="sr-only">Minimize window</span>
           <button
             type="button"
             aria-label="Maximize window"
+            aria-describedby="wc-max"
             onClick={() => handleWindowControl("maximize")}
             className="h-full px-3 text-[var(--text-dim)] hover:text-[var(--text-main)] hover:bg-[var(--bg-card-hover)] transition-colors"
           >
             <WindowMaximizeIcon className="w-3 h-3" />
           </button>
+          <span id="wc-max" role="tooltip" className="sr-only">Maximize window</span>
           <button
             type="button"
             aria-label="Close window"
+            aria-describedby="wc-close"
             onClick={() => handleWindowControl("close")}
             className="h-full px-3 text-[var(--text-dim)] hover:text-white hover:bg-rose-600 transition-colors"
           >
             <WindowCloseIcon className="w-3 h-3" />
           </button>
-        </div>
+          <span id="wc-close" role="tooltip" className="sr-only">Close window</span>
+        </div>}
       </div>
     </header>
   );

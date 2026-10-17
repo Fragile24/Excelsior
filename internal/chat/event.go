@@ -2,6 +2,7 @@ package chat
 
 import (
 	"encoding/json"
+	"excelsior/pkg/agent"
 	"excelsior/pkg/llm"
 )
 
@@ -32,6 +33,7 @@ type Event struct {
 	ToolResult   string
 	FinishReason string
 	Usage        *llm.Usage
+	Context      *agent.ContextStatus
 }
 
 // Outcome represents the authoritative terminal state of a run.
@@ -89,6 +91,10 @@ func cloneMessages(in []llm.Message) []llm.Message {
 	return out
 }
 func cloneEvent(e Event) Event {
+	if e.Context != nil {
+		value := *e.Context
+		e.Context = &value
+	}
 	if e.Usage != nil {
 		u := *e.Usage
 		e.Usage = &u

@@ -1,45 +1,34 @@
-# `apps/electron/lib/engineState.ts`
+# Frontend engine state
 
-Pure reducer: `WireMessage` → `EngineState` → React blocks. No socket, no storage, no side effects.
+`apps/electron/lib/engineState.ts` is a pure reducer from validated wire messages to the React view. Socket commands and reconnection belong to `EngineClient`; local preferences belong to `usePreferences`.
 
 ## State
 
-`EngineState` is per-session maps keyed by `sessionId`, plus global `workspace/status/sessions/error`:
+`EngineState` holds connection status, workspace, session metadata, selection, permission mode and errors. Its `conversations` map contains one record per session:
 
-* `blocksBySession`: rendered chat (`user/assistant/reason/tool/error`). `tool` uses `meta=toolName`, `content=result`, `args=streamed args`. `args===undefined` = still streaming.
-* `runIds` + `streamingBySession`: liveness. Set on `session.data{running,runId}`, cleared on `done`. Gates all live updates.
-* `asksBySession/permsBySession`: at most one pending dialog per session.
-* `usageBySession/outcomes/activeId/allowAll/refreshList`: token totals, terminal `done`, selected session, settings flag, list-refresh counter.
+- `blocks`: user, assistant, reasoning, tool and error output.
+- `runId/running`: the current run and its liveness.
+- `usage`: token totals for that run.
+- `pending`: one typed question or permission envelope, or null.
+- `outcome`: the terminal result, or null.
 
-## Entry
+The selected view comes from `activeConversation(state)`. Components receive this record and the original session metadata.
 
-`reduce(state, action)` handles `reset/status/active/error` directly, delegates `server` to `reduceServer`.
+## Updates
 
-`reduceServer`:
+`reduce` handles connection status, selection, reset and local errors. Server messages pass through a typed switch:
 
-1. `auth` → ignore.
-2. `workspace.set` → `switchWorkspace()` — mismatch wipes all session maps, keeps `status`.
-3. `msg.workspace !== state.workspace` → drop stale workspace.
-4. `serverHandlers[type]` table lookup, else ignore.
+1. Workspace changes reset all conversation records while retaining connection status.
+2. Messages from another workspace are ignored.
+3. Live deltas and interaction requests require a matching, running session.
+4. Terminal outcomes require the current run ID. Interaction resolution also requires the pending interaction ID.
 
-`isLiveRun(sid,runId)` = `runIds match && streaming`. `delta/ask.req/permission.req` drop if not live. `done/interaction.done` drop if `runId` mismatch.
+Session selection is published by the client after its snapshot is acknowledged. Background snapshots do not select sessions. The client refreshes session metadata after terminal events.
 
-## Snapshot (`session.data`)
+## Snapshots and streaming
 
-`applySnapshot`: base (`activeId/runId/usage/outcome` reset + `clearInteractions`) → `snapshotBlocks(messages)` → replay `events` via `applyDelta` → `withStreaming(running)` → `applyPending` → `applyOutcome` → `projectionUnavailable` error block.
+A snapshot builds a fresh conversation from history, replays current-run events, and applies its pending interaction and outcome. Repeated snapshots replace the record atomically.
 
-`snapshotBlocks`: `collectToolArgs` builds `toolCallId→args` map, `isDisplayable` drops `system` + empty-assistant-with-tool_calls, `messageToBlock` maps `tool/user→as-is`, rest→`assistant`.
+History is projected in message order so reused tool-call IDs retain the correct arguments. Live tool blocks match both run and call IDs; parallel results update their original block. Text and reasoning fragments append to the last matching block. Unknown delta types leave the view unchanged.
 
-## Delta (streaming)
-
-`applyDelta` → `deltaHandlers` table:
-
-* `text/reasoning/error` → `appendBlock` (merge if same `role+meta`, else push).
-* `tool_start` → `appendToolArgs` (append to unfinished tool, else new block).
-* `tool_result` → `completeTool` (move `content→args`, set result, else orphan block with `meta: "name →"`).
-* `generation/done` → `addUsage` (accumulate tokens, no-op if all zero).
-* unknown → `withStreaming(true)`.
-
-## Helpers (immutable)
-
-`withBlocks/withStreaming/clearInteractions/withoutKey/appendBlock` — all copy-on-write, `delete` = stop streaming / clear dialog.
+All transitions preserve the previous state. The transcript owns scrolling; the page composes views and issues commands through `useEngine.run`.

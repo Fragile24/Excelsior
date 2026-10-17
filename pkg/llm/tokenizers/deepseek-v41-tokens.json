@@ -1,0 +1,98 @@
+[
+  {
+    "index": 802,
+    "token": {
+      "id": 128799,
+      "content": "<｜System｜>",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": true,
+      "special": false
+    }
+  },
+  {
+    "index": 1268,
+    "token": {
+      "id": 129265,
+      "content": "<|place_holder_mm_span_0436|>",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false,
+      "special": false
+    }
+  },
+  {
+    "index": 1269,
+    "token": {
+      "id": 129266,
+      "content": "<|place_holder_mm_span_0437|>",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false,
+      "special": false
+    }
+  },
+  {
+    "index": 1270,
+    "token": {
+      "id": 129267,
+      "content": "<|place_holder_mm_span_0438|>",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false,
+      "special": false
+    }
+  },
+  {
+    "index": 1271,
+    "token": {
+      "id": 129268,
+      "content": "<|place_holder_mm_span_0439|>",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false,
+      "special": false
+    }
+  },
+  {
+    "index": 1272,
+    "token": {
+      "id": 129269,
+      "content": "<|place_holder_mm_span_0440|>",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false,
+      "special": false
+    }
+  },
+  {
+    "index": 1273,
+    "token": {
+      "id": 129270,
+      "content": "<|place_holder_mm_span_0441|>",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false,
+      "special": false
+    }
+  },
+  {
+    "index": 1282,
+    "token": {
+      "id": 129279,
+      "content": "<|place_holder_mm_span_0442|>",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false,
+      "special": true
+    }
+  }
+]

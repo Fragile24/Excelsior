@@ -2,6 +2,15 @@ import React from "react";
 
 type IconProps = { className?: string };
 
+export function BrandMark({ className = "brand-mark" }: IconProps) {
+  return (
+    <svg className={className} width="28" height="28" viewBox="0 0 32 32" fill="none" aria-hidden="true">
+      <rect x="1" y="1" width="30" height="30" rx="8" fill="currentColor" />
+      <path d="m9 10 6 6-6 6m10 0h5" stroke="var(--bg-card)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
 export const PlusIcon = React.memo(function PlusIcon({ className = "w-4 h-4" }: IconProps) {
   return (
     <svg width="16" height="16" className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">

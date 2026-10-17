@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -14,12 +15,6 @@ const (
 	// DefaultBaseURL is the DeepSeek API base URL.
 	DefaultBaseURL = "https://api.deepseek.com"
 )
-
-// ResolveModel trims whitespace and returns the model ID.
-// Only two models are supported: deepseek-v4-flash and deepseek-v4-pro (no aliases).
-func ResolveModel(m string) string {
-	return strings.TrimSpace(m)
-}
 
 // PermissionMode controls mutating tool approval.
 type PermissionMode string
@@ -48,13 +43,25 @@ func ParsePermissionMode(s string) (PermissionMode, error) {
 // flags override them. Permission is NOT here — it lives in Settings
 // (workspace settings.json, env-seeded) with CLI flags as a runtime override.
 type Config struct {
-	APIKey     string
-	BaseURL    string
-	Model      string
-	MaxTokens  int
-	Temperature float64
-	Workspace  string
-	EngineURL  string // ws://... for remote engine (TUI/desktop/mobile)
+	APIKey        string
+	BaseURL       string
+	Model         string
+	MaxTokens     int
+	Temperature   float64
+	TopP          float64
+	TokenEncoding string
+	Workspace     string
+	Harness       *HarnessSettings
+}
+
+// HarnessSettings groups the three independently configurable components.
+// A nil pointer selects the paper's default profile; a non-nil value is exact,
+// including ContextTier 0 and Planning false.
+type HarnessSettings struct {
+	ContextWindowTokens int
+	ContextTier         int
+	Planning            bool
+	ActionSpace         string
 }
 
 func envOr(key, fallback string) string {
@@ -64,16 +71,91 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
-// FromEnv reads configuration from environment variables.
-// Defaults: BaseURL=https://api.deepseek.com, Model=deepseek-v4-flash, Temperature=0.7.
-func FromEnv() Config {
+// FromEnv reads configuration from environment variables. Its defaults follow
+// the paper's T4/128k profile, temperature 0, top-p .95, and 16,384 output tokens.
+func FromEnv() (Config, error) {
+	tier, err := envInt("EXCELSIOR_CONTEXT_TIER", 4)
+	if err != nil {
+		return Config{}, err
+	}
+	window, err := envInt("EXCELSIOR_CONTEXT_WINDOW", 128000)
+	if err != nil {
+		return Config{}, err
+	}
+	planning, err := envBool("EXCELSIOR_PLANNING", true)
+	if err != nil {
+		return Config{}, err
+	}
+	maxTokens, err := envInt("EXCELSIOR_MAX_OUTPUT_TOKENS", 16384)
+	if err != nil {
+		return Config{}, err
+	}
+	temperature, err := envFloat("EXCELSIOR_TEMPERATURE", 0)
+	if err != nil {
+		return Config{}, err
+	}
+	topP, err := envFloat("EXCELSIOR_TOP_P", 0.95)
+	if err != nil {
+		return Config{}, err
+	}
+	actionSpace := strings.TrimSpace(os.Getenv("EXCELSIOR_ACTION_SPACE"))
+	if actionSpace == "" {
+		actionSpace = "predefined"
+	}
 	return Config{
-		APIKey:      strings.TrimSpace(os.Getenv("DEEPSEEK_API_KEY")),
-		BaseURL:     envOr("DEEPSEEK_BASE_URL", DefaultBaseURL),
-		Model:       ResolveModel(envOr("DEEPSEEK_MODEL", DefaultModel)),
-		Temperature: 0.7,
-		Workspace:   strings.TrimSpace(os.Getenv("EXCELSIOR_WORKSPACE")),
-		EngineURL:   strings.TrimSpace(os.Getenv("EXCELSIOR_ENGINE")),
+		APIKey:        strings.TrimSpace(os.Getenv("DEEPSEEK_API_KEY")),
+		BaseURL:       envOr("DEEPSEEK_BASE_URL", DefaultBaseURL),
+		Model:         envOr("DEEPSEEK_MODEL", DefaultModel),
+		MaxTokens:     maxTokens,
+		Temperature:   temperature,
+		TopP:          topP,
+		TokenEncoding: strings.TrimSpace(os.Getenv("EXCELSIOR_TOKEN_ENCODING")),
+		Workspace:     strings.TrimSpace(os.Getenv("EXCELSIOR_WORKSPACE")),
+		Harness: &HarnessSettings{
+			ContextWindowTokens: window,
+			ContextTier:         tier,
+			Planning:            planning,
+			ActionSpace:         actionSpace,
+		},
+	}, nil
+}
+
+func envInt(name string, fallback int) (int, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("config %s: expected an integer: %w", name, err)
+	}
+	return parsed, nil
+}
+
+func envFloat(name string, fallback float64) (float64, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		return 0, fmt.Errorf("config %s: expected a number: %w", name, err)
+	}
+	return parsed, nil
+}
+
+func envBool(name string, fallback bool) (bool, error) {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv(name)))
+	if value == "" {
+		return fallback, nil
+	}
+	switch value {
+	case "1", "true", "yes", "on":
+		return true, nil
+	case "0", "false", "no", "off":
+		return false, nil
+	default:
+		return false, fmt.Errorf("config %s: expected true or false", name)
 	}
 }
 
@@ -98,6 +180,36 @@ func (c Config) Validate() error {
 	}
 	if c.Temperature < 0 || c.Temperature > 2 {
 		return fmt.Errorf("config Temperature: must be 0..2, got %v: %w", c.Temperature, ErrInvalidTemperature)
+	}
+	if c.TopP < 0 || c.TopP > 1 {
+		return fmt.Errorf("config TopP: must be 0..1, got %v", c.TopP)
+	}
+	if c.MaxTokens < 0 {
+		return fmt.Errorf("config MaxTokens: must be positive")
+	}
+	if c.TokenEncoding != "" && c.TokenEncoding != "deepseek-v4" && c.TokenEncoding != "deepseek-v4.1" {
+		return fmt.Errorf("config TokenEncoding: use deepseek-v4 or deepseek-v4.1")
+	}
+	window, output := 128000, c.MaxTokens
+	if c.Harness != nil {
+		window = c.Harness.ContextWindowTokens
+	}
+	if output == 0 {
+		output = 16384
+	}
+	if window <= output {
+		return fmt.Errorf("config: output limit %d must be smaller than total context window %d", output, window)
+	}
+	if c.Harness != nil {
+		if c.Harness.ContextWindowTokens <= 0 {
+			return fmt.Errorf("config ContextWindowTokens: must be positive")
+		}
+		if c.Harness.ContextTier < 0 || c.Harness.ContextTier > 4 {
+			return fmt.Errorf("config ContextTier: must be 0..4, got %d", c.Harness.ContextTier)
+		}
+		if c.Harness.ActionSpace != "" && c.Harness.ActionSpace != "predefined" && c.Harness.ActionSpace != "bash" {
+			return fmt.Errorf("config ActionSpace: must be predefined or bash, got %q", c.Harness.ActionSpace)
+		}
 	}
 	return nil
 }

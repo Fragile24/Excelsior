@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"excelsior/pkg/agent"
 	"excelsior/pkg/llm"
 )
 
@@ -60,6 +61,7 @@ func NewEnvelopeWithID(id, typ string, payload any) Envelope {
 const (
 	TypeAuth               = "auth"
 	TypeChatCancel         = "chat.cancel"
+	TypeChatCompact        = "chat.compact"
 	TypeInteractionDone    = "interaction.done"
 	TypeChatReq            = "chat.req"
 	TypeDelta              = "delta"
@@ -79,6 +81,8 @@ const (
 	TypeSessionSubscribe   = "session.subscribe"
 	TypeSessionUnsubscribe = "session.unsubscribe"
 	TypeWorkspaceSet       = "workspace.set"
+	TypeWorktreeList       = "worktree.list"
+	TypeWorktreeCreate     = "worktree.create"
 	TypeSettingsGet        = "settings.get"
 	TypeSettingsSet        = "settings.set"
 )
@@ -88,28 +92,48 @@ type WorkspaceSetReq struct {
 	Workspace string `json:"workspace"`
 }
 
+// WorktreeInfo describes a linked Git checkout.
+type WorktreeInfo struct {
+	Path    string `json:"path"`
+	Branch  string `json:"branch,omitempty"`
+	Head    string `json:"head,omitempty"`
+	Main    bool   `json:"main"`
+	Current bool   `json:"current"`
+}
+
+type WorktreeListResp struct {
+	Worktrees []WorktreeInfo `json:"worktrees"`
+}
+
+type WorktreeCreateReq struct {
+	Branch string `json:"branch"`
+}
+
 // ChatReq is client → engine to start a turn. SessionID ties it to a session sidebar entry.
 type ChatReq struct {
-	SessionID string        `json:"sessionId,omitempty"`
-	Model     string        `json:"model"`
-	Messages  []llm.Message `json:"messages"`
+	SessionID       string              `json:"sessionId,omitempty"`
+	Model           string              `json:"model"`
+	ReasoningEffort llm.ReasoningEffort `json:"reasoningEffort,omitempty"`
+	Messages        []llm.Message       `json:"messages"`
+	Compact         bool                `json:"compact,omitempty"`
 }
 
 // Delta is engine → client streaming fragment (maps to agent.StreamEvent).
 type Delta struct {
-	RunID            string `json:"runId,omitempty"`
-	SessionID        string `json:"sessionId,omitempty"`
-	Type             string `json:"type"` // text|reasoning|tool_start|tool_result|done|error
-	Text             string `json:"text,omitempty"`
-	Reasoning        string `json:"reasoning,omitempty"`
-	ToolName         string `json:"toolName,omitempty"`
-	ToolCallID       string `json:"toolCallID,omitempty"`
-	ToolArgs         string `json:"toolArgs,omitempty"`
-	ToolResult       string `json:"toolResult,omitempty"`
-	FinishReason     string `json:"finishReason,omitempty"`
-	PromptTokens     int    `json:"promptTokens,omitempty"`
-	CompletionTokens int    `json:"completionTokens,omitempty"`
-	TotalTokens      int    `json:"totalTokens,omitempty"`
+	RunID            string               `json:"runId,omitempty"`
+	SessionID        string               `json:"sessionId,omitempty"`
+	Type             string               `json:"type"` // text|reasoning|tool_start|tool_result|done|error
+	Text             string               `json:"text,omitempty"`
+	Reasoning        string               `json:"reasoning,omitempty"`
+	ToolName         string               `json:"toolName,omitempty"`
+	ToolCallID       string               `json:"toolCallID,omitempty"`
+	ToolArgs         string               `json:"toolArgs,omitempty"`
+	ToolResult       string               `json:"toolResult,omitempty"`
+	FinishReason     string               `json:"finishReason,omitempty"`
+	PromptTokens     int                  `json:"promptTokens,omitempty"`
+	CompletionTokens int                  `json:"completionTokens,omitempty"`
+	TotalTokens      int                  `json:"totalTokens,omitempty"`
+	Context          *agent.ContextStatus `json:"context,omitempty"`
 }
 
 // AskReq is engine → client when agent calls askQuestion.
@@ -203,17 +227,15 @@ type SessionDataReq struct {
 
 // SessionDataResp contains the full message history for a session.
 type SessionDataResp struct {
-	Outcome *DoneResp `json:"outcome,omitempty"`
-	UnsavedAvailable bool `json:"unsavedAvailable"`
-	ProjectionUnavailable bool `json:"projectionUnavailable"`
-	RunID     string        `json:"runId,omitempty"`
-	Running   bool          `json:"running"`
-	Status    string        `json:"status,omitempty"`
-	Persisted bool          `json:"persisted,omitempty"`
-	Events    []Delta       `json:"events,omitempty"`
-	Pending   *Envelope     `json:"pending,omitempty"`
-	ID        string        `json:"id"`
-	Messages  []llm.Message `json:"messages"`
+	Outcome               *DoneResp     `json:"outcome,omitempty"`
+	UnsavedAvailable      bool          `json:"unsavedAvailable"`
+	ProjectionUnavailable bool          `json:"projectionUnavailable"`
+	RunID                 string        `json:"runId,omitempty"`
+	Running               bool          `json:"running"`
+	Events                []Delta       `json:"events,omitempty"`
+	Pending               *Envelope     `json:"pending,omitempty"`
+	ID                    string        `json:"id"`
+	Messages              []llm.Message `json:"messages"`
 }
 
 // SessionRenameReq renames a session.
@@ -230,17 +252,14 @@ type SessionSubscriptionReq struct {
 // SettingsGetResp returns current settings.
 type SettingsGetResp struct {
 	Permission string `json:"permission"` // ask|allow|deny
-	AllowAll   bool   `json:"allowAll"`
 }
 
 // SettingsSetReq updates settings. Only provided fields are updated.
 type SettingsSetReq struct {
 	Permission *string `json:"permission,omitempty"`
-	AllowAll   *bool   `json:"allowAll,omitempty"`
 }
 
 // SettingsSetResp confirms updated settings.
 type SettingsSetResp struct {
 	Permission string `json:"permission"`
-	AllowAll   bool   `json:"allowAll"`
 }

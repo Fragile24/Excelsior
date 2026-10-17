@@ -9,7 +9,7 @@ import (
 	"excelsior/pkg/llm"
 )
 
-// MemoryStore is a thread-safe in-memory implementation of [Store], ideal for unit/integration tests.
+// MemoryStore keeps ephemeral conversations in memory and is safe for concurrent use.
 type MemoryStore struct {
 	mu       sync.RWMutex
 	sessions map[string]Record
@@ -82,17 +82,7 @@ func (m *MemoryStore) List() ([]SessionMeta, error) {
 
 	metas := make([]SessionMeta, 0, len(m.sessions))
 	for _, rec := range m.sessions {
-		updatedAt := rec.UpdatedAt
-		if updatedAt.IsZero() {
-			updatedAt = rec.CreatedAt
-		}
-		metas = append(metas, SessionMeta{
-			ID:        rec.ID,
-			Title:     rec.Title,
-			CreatedAt: rec.CreatedAt,
-			UpdatedAt: updatedAt,
-			MsgCount:  len(rec.Messages),
-		})
+		metas = append(metas, rec.Metadata())
 	}
 
 	sort.Slice(metas, func(i, j int) bool {
@@ -112,9 +102,4 @@ func (m *MemoryStore) Delete(id string) error {
 
 	delete(m.sessions, safeID)
 	return nil
-}
-
-// Latest returns the most recently updated session. Returns ErrSessionNotFound if empty.
-func (m *MemoryStore) Latest() (Record, error) {
-	return Latest(m)
 }

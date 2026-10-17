@@ -14,12 +14,13 @@ Desktop / mobile / CLI -- WebSocket --> Go engine
 - The transport-neutral internal/chat.Coordinator owns runs, keyed by canonical workspace path and session ID. There is one active turn per session across all connections. Different sessions may run concurrently.
 - Connections authenticate, select a workspace, subscribe, and forward commands. Disconnecting does not cancel work. The engine captures the workspace at run creation, so later client navigation cannot redirect tools.
 - One mutex orders registration, projection updates, snapshot enqueueing, events, terminal outcomes and interaction replies. Each subscriber has an immutable workspace and a bounded queue; callbacks never execute under this mutex. Tools run outside that mutex. One JSON store is reused per workspace. Rename/delete reject active sessions.
-- The existing chat service owns successful-turn persistence. Missing sessions start empty; corrupted/unreadable sessions fail without overwrite. Existing JSON files retain their format. SQLite/account code is removed; old databases are untouched.
-- GoAI owns provider HTTP, streaming, retries, and the tool loop. Keep the existing agent and tool boundaries; no new service framework or dependency injection layer.
+- The chat coordinator owns successful-turn persistence. Missing sessions start empty; corrupted or unreadable sessions fail without overwrite. Sessions are stored as atomic JSON files in the workspace.
+- Session stores derive display titles from each loaded record while building list metadata, avoiding a second read of untitled conversations.
+- GoAI owns provider HTTP, streaming, retries, and provider-specific message formats. `pkg/agent` owns the fixed ReAct loop so planning, action-space selection, context management, safety checks, diagnostics, and stuck detection are applied consistently.
 
 ## Protocol
 
-The v1 envelope retains its existing types and adds a canonical `workspace` field on workspace-scoped responses/events. Updated clients are required because authentication is now mandatory.
+The versioned envelope includes the canonical `workspace` on workspace-scoped responses and events. Every connection must authenticate before issuing commands; the handshake advertises the run lifecycle capability.
 
 1. Within five seconds of connecting, send `auth` with `{token}`. No other operation is accepted first. The response includes `{ok:true,workspace,capabilities:["run-lifecycle-v1"]}`; clients require that capability. Tokens are never placed in URLs.
 2. `workspace.set` acknowledges the canonical workspace, followed by `session.list`. This clears the connection's old subscriptions. Clients ignore queued events from another workspace.
@@ -43,7 +44,7 @@ Slow subscribers are disconnected rather than losing events silently. Reconnect 
 
 ## Limits
 
-OS leases enforce one process per workspace store, including reads and preparation. Shutdown cancels pre-commit work, drains commits, then closes subscriptions and leases; a timeout retains leases while workers remain. Runs survive client disconnects, not process restarts. Completed history survives restart; failed/canceled partial turns are not saved. No automatic run recovery, account system, mobile UI, or database migration is included.
+OS leases enforce one process per workspace store, including reads and preparation. Shutdown cancels pre-commit work, drains commits, then closes subscriptions and leases; a timeout retains leases while workers remain. Runs survive client disconnects, not process restarts. Completed history survives restart; failed/canceled partial turns are not saved. There is no automatic run recovery, account system, or mobile UI.
 
 For remote control, use an externally started engine. Closing Electron stops an engine it spawned, but never stops an external engine. Frontend assets remain separate from the Go binary.
 
@@ -51,6 +52,8 @@ For remote control, use an externally started engine. Closing Electron stops an 
 
 Application subscriptions allow 128 updates and 16 MiB; transport output also allows 128 envelopes and 16 MiB. A run snapshot is capped at 4 MiB. Terminal retention allows 64 sessions and 32 MiB per coordinator. Eviction loses unsaved output; there is no durable partial-turn log. Every assembled provider request, including tools and arguments, is checked against a 600,000-byte budget before network execution.
 
+Context windows count input plus reserved output tokens. The harness meters complete prompts with the configured model's published DeepSeek V4/V4.1 template and tokenizer, then compacts against the remaining input allowance. Summary calls reserve their own output space. The client repeats the input-plus-output check before generation. Unsupported model formats require an explicit matching token encoding or a custom provider counter; they do not use character estimates. See [token budgets](docs/harness.md#token-budgets).
+
 Desktop builds the Go binary for each packaging target and loads it only from packaged resources. The default owned workspace is under userData; EXCELSIOR_WORKSPACE overrides it. EXCELSIOR_ENGINE_ADDR controls both listener and client endpoint; EXCELSIOR_ENGINE selects an external engine. Readiness requires authenticated capability negotiation. Native IPC checks the exact renderer URL and main frame. Shell cancellation cleans up descendants; edit reads are bounded and preserve file permissions.
 
-Store I/O still uses the coordinator ordering mutex. Lock splitting, caches and frontend batching remain measurement-driven follow-up work. See [implementation and validation](docs/architecture-implementation.md).
+Store I/O still uses the coordinator ordering mutex. Lock splitting, caches and frontend batching remain measurement-driven follow-up work. See [runtime flows](FLOWS.md) and [session runs](docs/runs.md).
